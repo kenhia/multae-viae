@@ -1,0 +1,10 @@
+/target
+.scratch-agent/
+.scratch/
+*.log
+.env*
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp
+.vscode/mcp.json

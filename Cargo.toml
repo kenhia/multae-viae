@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/mv-core", "crates/mv-cli"]
+resolver = "3"
