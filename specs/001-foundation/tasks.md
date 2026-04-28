@@ -24,11 +24,11 @@
 
 **Purpose**: Cargo workspace, crate scaffolding, justfile, .gitignore
 
-- [ ] T001 Create workspace root `Cargo.toml` with members `crates/mv-core` and `crates/mv-cli`
-- [ ] T002 [P] Create `crates/mv-core/Cargo.toml` with dependencies: thiserror, serde, serde_json
-- [ ] T003 [P] Create `crates/mv-cli/Cargo.toml` with dependencies: mv-core (path), rig-core 0.35, tokio, clap (derive), anyhow, tracing, tracing-subscriber (env-filter)
-- [ ] T004 [P] Create `justfile` with recipes: build, test, check, fmt, lint, run, ci
-- [ ] T005 [P] Update `.gitignore` to include `/target`, `.scratch-agent/`, `.scratch/`
+- [x] T001 Create workspace root `Cargo.toml` with members `crates/mv-core` and `crates/mv-cli`
+- [x] T002 [P] Create `crates/mv-core/Cargo.toml` with dependencies: thiserror, serde, serde_json
+- [x] T003 [P] Create `crates/mv-cli/Cargo.toml` with dependencies: mv-core (path), rig-core 0.35, tokio, clap (derive), anyhow, tracing, tracing-subscriber (env-filter)
+- [x] T004 [P] Create `justfile` with recipes: build, test, check, fmt, lint, run, ci
+- [x] T005 [P] Update `.gitignore` to include `/target`, `.scratch-agent/`, `.scratch/`
 
 ---
 
@@ -38,10 +38,10 @@
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T006 Define `MvError` enum in `crates/mv-core/src/lib.rs` with variants: EmptyPrompt, BackendUnreachable, ModelNotFound, CompletionFailed — derive `thiserror::Error` with actionable user messages per data-model.md
-- [ ] T007 [P] Define `BackendConfig` struct in `crates/mv-core/src/lib.rs` with fields: endpoint (String, default `http://localhost:11434`), model (String, default `qwen3:4b`)
-- [ ] T008 [P] Write unit tests for `MvError` display messages in `crates/mv-core/src/lib.rs` (inline tests module)
-- [ ] T009 [P] Write unit test for `BackendConfig` default values in `crates/mv-core/src/lib.rs` (inline tests module)
+- [x] T006 Define `MvError` enum in `crates/mv-core/src/lib.rs` with variants: EmptyPrompt, BackendUnreachable, ModelNotFound, CompletionFailed — derive `thiserror::Error` with actionable user messages per data-model.md
+- [x] T007 [P] Define `BackendConfig` struct in `crates/mv-core/src/lib.rs` with fields: endpoint (String, default `http://localhost:11434`), model (String, default `qwen3:4b`)
+- [x] T008 [P] Write unit tests for `MvError` display messages in `crates/mv-core/src/lib.rs` (inline tests module)
+- [x] T009 [P] Write unit test for `BackendConfig` default values in `crates/mv-core/src/lib.rs` (inline tests module)
 
 **Checkpoint**: Foundation ready — `cargo test -p mv-core` passes with all tests green
 
@@ -57,19 +57,19 @@
 
 > **NOTE: Write these tests FIRST, ensure they FAIL before implementation**
 
-- [ ] T010 [US1] Write unit test for prompt validation (empty/whitespace rejection) in `crates/mv-core/src/lib.rs`
-- [ ] T011 [US1] Write unit test for empty model response handling (no panic, exit 0) in `crates/mv-core/src/lib.rs`
-- [ ] T012 [US1] Write integration test for CLI argument parsing (valid prompt, --model, --endpoint, --json flags) in `crates/mv-cli/tests/cli_args.rs`
-- [ ] T013 [US1] Write integration test for CLI exit codes (0 on success, 1 on error) in `crates/mv-cli/tests/cli_args.rs`
+- [x] T010 [US1] Write unit test for prompt validation (empty/whitespace rejection) in `crates/mv-core/src/lib.rs`
+- [x] T011 [US1] Write unit test for empty model response handling (no panic, exit 0) in `crates/mv-core/src/lib.rs`
+- [x] T012 [US1] Write integration test for CLI argument parsing (valid prompt, --model, --endpoint, --json flags) in `crates/mv-cli/tests/cli_args.rs`
+- [x] T013 [US1] Write integration test for CLI exit codes (0 on success, 1 on error) in `crates/mv-cli/tests/cli_args.rs`
 
 ### Implementation for User Story 1
 
-- [ ] T014 [US1] Implement prompt validation function in `crates/mv-core/src/lib.rs` — reject empty/whitespace, return `MvError::EmptyPrompt`
-- [ ] T015 [US1] Define CLI args struct with clap derive in `crates/mv-cli/src/main.rs` — positional PROMPT, --model, --endpoint, --json, -v verbosity
-- [ ] T016 [US1] Implement `run()` async function in `crates/mv-cli/src/main.rs` — create Ollama client via Rig, build agent, send prompt, print response to stdout
-- [ ] T017 [US1] Implement error handling in `main()` in `crates/mv-cli/src/main.rs` — map Rig errors to `MvError` variants, print to stderr (or JSON error object if --json), exit code 1
-- [ ] T018 [US1] Handle edge case: empty model response (print nothing or empty string, exit 0) in `crates/mv-cli/src/main.rs`
-- [ ] T019 [US1] Implement `--json` output mode in `crates/mv-cli/src/main.rs` — wrap response in `{"response": "..."}` JSON object; errors as `{"error": "..."}` to stdout
+- [x] T014 [US1] Implement prompt validation function in `crates/mv-core/src/lib.rs` — reject empty/whitespace, return `MvError::EmptyPrompt`
+- [x] T015 [US1] Define CLI args struct with clap derive in `crates/mv-cli/src/main.rs` — positional PROMPT, --model, --endpoint, --json, -v verbosity
+- [x] T016 [US1] Implement `run()` async function in `crates/mv-cli/src/main.rs` — create Ollama client via Rig, build agent, send prompt, print response to stdout
+- [x] T017 [US1] Implement error handling in `main()` in `crates/mv-cli/src/main.rs` — map Rig errors to `MvError` variants, print to stderr (or JSON error object if --json), exit code 1
+- [x] T018 [US1] Handle edge case: empty model response (print nothing or empty string, exit 0) in `crates/mv-cli/src/main.rs`
+- [x] T019 [US1] Implement `--json` output mode in `crates/mv-cli/src/main.rs` — wrap response in `{"response": "..."}` JSON object; errors as `{"error": "..."}` to stdout
 
 **Checkpoint**: `cargo run -p mv-cli -- "Hello"` returns a model response. `cargo run -p mv-cli -- --json "Hello"` returns JSON. `cargo test --workspace` passes.
 
@@ -85,14 +85,14 @@
 
 > **NOTE: Write these tests FIRST, ensure they FAIL before implementation**
 
-- [ ] T020 [US2] Write integration test verifying default verbosity produces no stderr output in `crates/mv-cli/tests/cli_logging.rs`
-- [ ] T021 [US2] Write integration test verifying -v flag produces structured log lines on stderr in `crates/mv-cli/tests/cli_logging.rs`
+- [x] T020 [US2] Write integration test verifying default verbosity produces no stderr output in `crates/mv-cli/tests/cli_logging.rs`
+- [x] T021 [US2] Write integration test verifying -v flag produces structured log lines on stderr in `crates/mv-cli/tests/cli_logging.rs`
 
 ### Implementation for User Story 2
 
-- [ ] T022 [US2] Implement tracing subscriber initialization in `crates/mv-cli/src/main.rs` — EnvFilter, fmt layer to stderr, verbosity mapped from -v count
-- [ ] T023 [US2] Add tracing spans and events to `run()` in `crates/mv-cli/src/main.rs` — info for connect/request/response, debug for config details
-- [ ] T024 [US2] Ensure RUST_LOG environment variable overrides -v flag in `crates/mv-cli/src/main.rs`
+- [x] T022 [US2] Implement tracing subscriber initialization in `crates/mv-cli/src/main.rs` — EnvFilter, fmt layer to stderr, verbosity mapped from -v count
+- [x] T023 [US2] Add tracing spans and events to `run()` in `crates/mv-cli/src/main.rs` — info for connect/request/response, debug for config details
+- [x] T024 [US2] Ensure RUST_LOG environment variable overrides -v flag in `crates/mv-cli/src/main.rs`
 
 **Checkpoint**: Default run shows only response on stdout. `-vv` shows structured logs on stderr. `cargo test --workspace` passes.
 
@@ -106,10 +106,10 @@
 
 ### Implementation for User Story 3
 
-- [ ] T025 [US3] Run `cargo fmt --all` and fix any formatting issues across all crates
-- [ ] T026 [US3] Run `cargo clippy --all-targets --all-features -- -D warnings` and fix all warnings across all crates
-- [ ] T027 [US3] Verify `just ci` recipe runs `cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test --workspace` and exits 0
-- [ ] T028 [US3] Run `just ci` and confirm zero warnings, zero failures
+- [x] T025 [US3] Run `cargo fmt --all` and fix any formatting issues across all crates
+- [x] T026 [US3] Run `cargo clippy --all-targets --all-features -- -D warnings` and fix all warnings across all crates
+- [x] T027 [US3] Verify `just ci` recipe runs `cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test --workspace` and exits 0
+- [x] T028 [US3] Run `just ci` and confirm zero warnings, zero failures
 
 **Checkpoint**: `just ci` passes clean. All quality gates green.
 
@@ -119,9 +119,9 @@
 
 **Purpose**: Documentation, cleanup, and quickstart validation
 
-- [ ] T029 [P] Update `README.md` with build/run instructions, prerequisites (Ollama, Rust, just), and CLI usage examples
-- [ ] T030 Run quickstart.md validation — follow quickstart.md steps on a clean build and verify all commands work
-- [ ] T031 Verify all acceptance scenarios from spec.md: happy path, Ollama down, no model, empty prompt, --json output
+- [x] T029 [P] Update `README.md` with build/run instructions, prerequisites (Ollama, Rust, just), and CLI usage examples
+- [x] T030 Run quickstart.md validation — follow quickstart.md steps on a clean build and verify all commands work
+- [x] T031 Verify all acceptance scenarios from spec.md: happy path, Ollama down, no model, empty prompt, --json output
 
 ---
 

@@ -38,3 +38,36 @@ See the [docs/](docs/) directory for in-depth research and architecture design:
 | Telemetry | [OpenTelemetry](https://github.com/open-telemetry/opentelemetry-rust) + `tracing` |
 | ML Framework | [Candle](https://github.com/huggingface/candle) (HuggingFace) |
 
+## Quick Start
+
+### Prerequisites
+
+- **Rust** (stable, edition 2024): `rustup update stable`
+- **Ollama** running locally: `ollama serve`
+- **Model pulled**: `ollama pull qwen3:4b`
+- **just** task runner: `cargo install just`
+
+### Build & Run
+
+```bash
+just build                              # Build all crates
+just run "What is Rust?"                # Send a prompt
+just run "What is Rust?" --json         # JSON output
+just run "Hello" -vv 2>debug.log        # Verbose logging
+just ci                                 # Format + clippy + test
+```
+
+### CLI Usage
+
+```
+mv-cli [OPTIONS] <PROMPT>
+
+Options:
+  -m, --model <MODEL>      Model name [default: qwen3:4b]
+  -e, --endpoint <URL>     Ollama endpoint [default: http://localhost:11434]
+  -j, --json               Output response as JSON object
+  -v, --verbose            Increase log verbosity (repeat for more: -vv)
+  -h, --help               Print help
+  -V, --version            Print version
+```
+
