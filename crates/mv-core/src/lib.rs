@@ -3,6 +3,8 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+pub mod tools;
+
 /// Where a model runs.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "lowercase")]
