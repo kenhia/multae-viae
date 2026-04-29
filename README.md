@@ -108,3 +108,35 @@ cargo run -p mv-cli -- --otlp "What is Rust?"
 # View traces at http://localhost:16686
 ```
 
+### Tool Calling
+
+The CLI includes built-in tools that the model can invoke automatically during a
+conversation. When a question requires local environment interaction, the agent
+calls the appropriate tool, receives the result, and incorporates it into a
+natural-language response.
+
+**Available tools:**
+
+| Tool | Description | Example Prompt |
+|------|-------------|---------------|
+| `file_list` | List directory contents | "What files are in the current directory?" |
+| `file_read` | Read a file | "What does README.md say?" |
+| `shell_exec` | Run a shell command (30s timeout) | "What git branch am I on?" |
+| `http_get` | Fetch a URL via HTTP GET (30s timeout) | "What is the title of https://example.com?" |
+
+Tool calling is transparent — the same CLI invocation works for both tool-using
+and non-tool-using queries. Tool output is truncated at 10,000 characters. The
+agentic loop runs for up to 10 turns before returning.
+
+```bash
+# File tools
+cargo run -p mv-cli -- "What files are in the current directory?"
+cargo run -p mv-cli -- "What does the README say?"
+
+# Shell execution
+cargo run -p mv-cli -- "What git branch am I on?"
+
+# HTTP fetch
+cargo run -p mv-cli -- "What is the title of https://example.com?"
+```
+

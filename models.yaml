@@ -9,6 +9,9 @@ models:
   - id: qwen3:8b
     provider: ollama
 
+  - id: qwen3-coder:30b
+    provider: ollama
+
   # Cloud provider example (uncomment and set OPENAI_API_KEY env var)
   # - id: gpt-4o-mini
   #   provider: openai

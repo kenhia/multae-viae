@@ -212,19 +212,81 @@ multae-viae/
 ├── Cargo.toml              # Workspace root
 ├── crates/
 │   ├── mv-core/            # Core types, traits, error handling
-│   ├── mv-engine/          # Workflow engine, step execution
-│   ├── mv-router/          # Model routing logic
-│   ├── mv-mcp/             # MCP client integration (wraps rmcp)
-│   ├── mv-tools/           # Built-in tool implementations
-│   ├── mv-telemetry/       # OTel setup, custom spans/metrics
-│   ├── mv-dsl/             # YAML DSL parser and validator
-│   ├── mv-rag/             # RAG client, embedding pipeline
-│   ├── mv-server/          # gRPC/REST API server
-│   └── mv-cli/             # CLI binary
-├── config/                 # Default configurations
-├── workflows/              # Example DSL workflow files
-└── docs/                   # This documentation
+│   │   └── src/
+│   │       ├── lib.rs       # ModelRegistry, MvError, validation
+│   │       └── tools/       # Built-in tool implementations
+│   │           ├── mod.rs    # Constants, truncation helper
+│   │           ├── file_list.rs
+│   │           ├── file_read.rs
+│   │           ├── shell_exec.rs
+│   │           └── http_get.rs
+│   ├── mv-cli/             # CLI binary
+│   │   └── src/
+│   │       └── main.rs      # Agent builder with tools, preamble, telemetry
+│   ├── mv-engine/          # Workflow engine, step execution (future)
+│   ├── mv-router/          # Model routing logic (future)
+│   ├── mv-mcp/             # MCP client integration (future)
+│   ├── mv-telemetry/       # OTel setup, custom spans/metrics (future)
+│   ├── mv-dsl/             # YAML DSL parser and validator (future)
+│   ├── mv-rag/             # RAG client, embedding pipeline (future)
+│   └── mv-server/          # gRPC/REST API server (future)
+├── docs/                   # This documentation
+└── specs/                  # Iteration specifications
 ```
+
+## Current Implementation: Tool System
+
+As of Sprint 003, the CLI operates as an agentic system with built-in tools. The
+architecture uses Rig's native multi-turn agent loop — tools are registered with
+the agent builder and the model decides when and how to invoke them.
+
+### Tool Architecture
+
+```
+User Prompt
+    │
+    ▼
+┌───────────────────────────────────┐
+│  Agent (Rig AgentBuilder)         │
+│  ├── preamble (system prompt)     │
+│  ├── tools: [FileList, FileRead,  │
+│  │           ShellExec, HttpGet]  │
+│  └── default_max_turns(10)        │
+└───────────────┬───────────────────┘
+                │
+    ┌───────────▼────────────┐
+    │    Rig Agentic Loop    │
+    │  (internal multi-turn) │
+    └───────────┬────────────┘
+                │
+        ┌───────┴───────┐
+        ▼               ▼
+  Text Response    Tool Call(s)
+  (return to       (execute locally)
+   user)                │
+                        ▼
+                  Tool Result(s)
+                  (feed back to model)
+```
+
+### Built-in Tools
+
+| Tool | Module | Description | Timeout |
+|------|--------|-------------|---------|
+| `file_list` | `mv_core::tools::file_list` | List directory contents | N/A |
+| `file_read` | `mv_core::tools::file_read` | Read file contents | N/A |
+| `shell_exec` | `mv_core::tools::shell_exec` | Execute shell command | 30s |
+| `http_get` | `mv_core::tools::http_get` | HTTP GET request | 30s |
+
+All tool output is truncated at 10,000 characters. Tools are implemented using
+the `#[rig_tool]` macro and instrumented with `#[tracing::instrument]` for
+OpenTelemetry trace visibility.
+
+### Error Flow
+
+Tool errors are returned as `ToolError::ToolCallError(String)`. Rig feeds error
+messages back to the model automatically, allowing the model to retry or explain
+the failure without crashing the session.
 
 ## Technology Stack Summary
 

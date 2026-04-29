@@ -59,11 +59,11 @@ clap = { version = "4", features = ["derive"] }
 **Goal**: Agent can call tools and use results in responses.
 
 ### Tasks
-- [ ] Implement tool registry with built-in tools (file read, shell exec, HTTP)
-- [ ] Integrate Rig's tool calling with `#[tool_macro]`
-- [ ] Add tool call instrumentation (telemetry)
-- [ ] Implement basic agentic loop (model → tool → model → response)
-- [ ] Add tool result formatting and context injection
+- [x] Implement tool registry with built-in tools (file read, shell exec, HTTP)
+- [x] Integrate Rig's tool calling with `#[tool_macro]`
+- [x] Add tool call instrumentation (telemetry)
+- [x] Implement basic agentic loop (model → tool → model → response)
+- [x] Add tool result formatting and context injection
 
 ### Deliverable
 ```bash

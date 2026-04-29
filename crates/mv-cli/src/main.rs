@@ -8,6 +8,12 @@ use std::sync::OnceLock;
 
 static TRACER_PROVIDER: OnceLock<opentelemetry_sdk::trace::SdkTracerProvider> = OnceLock::new();
 
+const SYSTEM_PREAMBLE: &str = "\
+You are a helpful assistant with access to local tools. \
+Use the available tools to answer questions that require interacting with the local environment. \
+If a question can be answered from your own knowledge, respond directly without using tools. \
+When you use a tool, incorporate the result into a clear, human-readable response.";
+
 #[derive(Parser, Debug)]
 #[command(name = "mv-cli", version, about = "Send a prompt to a local LLM")]
 struct Cli {
@@ -112,7 +118,15 @@ async fn call_ollama(
             endpoint: format!("{endpoint}: {e}"),
         })?;
 
-    let agent = client.agent(model).build();
+    let agent = client
+        .agent(model)
+        .preamble(SYSTEM_PREAMBLE)
+        .tool(mv_core::tools::file_list::FileList)
+        .tool(mv_core::tools::file_read::FileRead)
+        .tool(mv_core::tools::shell_exec::ShellExec)
+        .tool(mv_core::tools::http_get::HttpGet)
+        .default_max_turns(10)
+        .build();
 
     info!("sending prompt to model");
     let response = agent.prompt(prompt).await.map_err(|e| {
@@ -147,7 +161,15 @@ async fn call_openai(
             endpoint: format!("{endpoint}: {e}"),
         })?;
 
-    let agent = client.agent(model).build();
+    let agent = client
+        .agent(model)
+        .preamble(SYSTEM_PREAMBLE)
+        .tool(mv_core::tools::file_list::FileList)
+        .tool(mv_core::tools::file_read::FileRead)
+        .tool(mv_core::tools::shell_exec::ShellExec)
+        .tool(mv_core::tools::http_get::HttpGet)
+        .default_max_turns(10)
+        .build();
 
     info!("sending prompt to model");
     let response = agent.prompt(prompt).await.map_err(|e| {
@@ -199,7 +221,7 @@ fn print_error(err: &mv_core::MvError, json: bool) {
 }
 
 fn init_tracing(verbose: u8, otlp_endpoint: Option<&str>) {
-    let filter = if std::env::var("RUST_LOG").is_ok() {
+    let console_filter = if std::env::var("RUST_LOG").is_ok() {
         EnvFilter::from_default_env()
     } else {
         match verbose {
@@ -209,10 +231,12 @@ fn init_tracing(verbose: u8, otlp_endpoint: Option<&str>) {
         }
     };
 
-    let fmt_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_filter(console_filter);
 
     let otel_layer = otlp_endpoint.and_then(|endpoint| match init_otel_layer(endpoint) {
-        Ok(layer) => Some(layer),
+        Ok(layer) => Some(layer.with_filter(EnvFilter::new("info"))),
         Err(e) => {
             eprintln!("Warning: Failed to initialize OTLP exporter: {e}");
             None
@@ -220,7 +244,6 @@ fn init_tracing(verbose: u8, otlp_endpoint: Option<&str>) {
     });
 
     tracing_subscriber::registry()
-        .with(filter)
         .with(fmt_layer)
         .with(otel_layer)
         .init();
