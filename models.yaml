@@ -1,0 +1,15 @@
+# Model registry for multae-viae
+# See specs/002-multi-model-telemetry/data-model.md for schema documentation.
+
+models:
+  - id: qwen3:4b
+    provider: ollama
+    default: true
+
+  - id: qwen3:8b
+    provider: ollama
+
+  # Cloud provider example (uncomment and set OPENAI_API_KEY env var)
+  # - id: gpt-4o-mini
+  #   provider: openai
+  #   api_key_env: OPENAI_API_KEY
