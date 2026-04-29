@@ -5,12 +5,12 @@
 **Goal**: Working Rust workspace that can call a local model and print a response.
 
 ### Tasks
-- [ ] Initialize Cargo workspace with crate structure
-- [ ] Set up `mv-core` with core types and error handling
-- [ ] Add Rig dependency, configure Ollama provider
-- [ ] Write a simple CLI that sends a prompt to Ollama via Rig
-- [ ] Set up basic `tracing` with console output
-- [ ] Establish CI (cargo check, clippy, test)
+- [x] Initialize Cargo workspace with crate structure
+- [x] Set up `mv-core` with core types and error handling
+- [x] Add Rig dependency, configure Ollama provider
+- [x] Write a simple CLI that sends a prompt to Ollama via Rig
+- [x] Set up basic `tracing` with console output
+- [x] Establish CI (cargo check, clippy, test)
 
 ### Deliverable
 ```bash
@@ -40,13 +40,13 @@ clap = { version = "4", features = ["derive"] }
 **Goal**: Call multiple models, basic model routing, OpenTelemetry traces.
 
 ### Tasks
-- [ ] Implement model registry (static configuration from YAML)
-- [ ] Add prescriptive model routing (DSL specifies model per step)
-- [ ] Set up OpenTelemetry with OTLP exporter
-- [ ] Add `tracing-opentelemetry` bridge
-- [ ] Instrument model calls with GenAI semantic conventions
-- [ ] Deploy Jaeger all-in-one for trace visualization
-- [ ] Add a second provider (e.g., OpenAI for cloud fallback)
+- [x] Implement model registry (static configuration from YAML)
+- [x] Add prescriptive model routing (DSL specifies model per step)
+- [x] Set up OpenTelemetry with OTLP exporter
+- [x] Add `tracing-opentelemetry` bridge
+- [x] Instrument model calls with GenAI semantic conventions
+- [x] Deploy Jaeger all-in-one for trace visualization
+- [x] Add a second provider (e.g., OpenAI for cloud fallback)
 
 ### Deliverable
 - CLI can route requests to different models based on configuration

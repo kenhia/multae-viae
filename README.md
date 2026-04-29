@@ -63,11 +63,48 @@ just ci                                 # Format + clippy + test
 mv-cli [OPTIONS] <PROMPT>
 
 Options:
-  -m, --model <MODEL>      Model name [default: qwen3:4b]
-  -e, --endpoint <URL>     Ollama endpoint [default: http://localhost:11434]
+  -m, --model <MODEL>      Model name (from registry or built-in)
+  -e, --endpoint <URL>     Override model endpoint
+  -c, --config <PATH>      Path to models.yaml config file
+      --otlp [<ENDPOINT>]  Enable OTLP trace export [default: http://localhost:4318]
   -j, --json               Output response as JSON object
   -v, --verbose            Increase log verbosity (repeat for more: -vv)
   -h, --help               Print help
   -V, --version            Print version
+```
+
+### Model Configuration
+
+Create a `models.yaml` in the project root to configure available models:
+
+```yaml
+models:
+  - id: qwen3:4b
+    provider: ollama
+    default: true
+  - id: qwen3:8b
+    provider: ollama
+  # Cloud provider (set OPENAI_API_KEY env var)
+  # - id: gpt-4o-mini
+  #   provider: openai
+  #   api_key_env: OPENAI_API_KEY
+```
+
+Without a config file, the CLI uses built-in defaults (qwen3:4b via Ollama).
+
+### OpenTelemetry Traces
+
+To view traces in Jaeger:
+
+```bash
+# Start Jaeger (all-in-one)
+docker run -d --name jaeger \
+  -p 16686:16686 -p 4318:4318 \
+  jaegertracing/all-in-one:latest
+
+# Send a prompt with tracing enabled
+cargo run -p mv-cli -- --otlp "What is Rust?"
+
+# View traces at http://localhost:16686
 ```
 
