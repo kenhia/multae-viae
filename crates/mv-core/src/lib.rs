@@ -3,6 +3,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+pub mod mcp;
 pub mod tools;
 
 /// Where a model runs.
@@ -173,6 +174,18 @@ pub enum MvError {
 
     #[error("API key required for {provider}. Set {env_var} environment variable.")]
     ApiKeyMissing { provider: String, env_var: String },
+
+    #[error("MCP config file not found: {path}")]
+    McpConfigNotFound { path: String },
+
+    #[error("failed to parse MCP config '{path}': {details}")]
+    McpConfigParseError { path: String, details: String },
+
+    #[error("MCP server '{server}': {details}")]
+    McpServerError { server: String, details: String },
+
+    #[error("duplicate MCP server name: '{name}'")]
+    McpDuplicateServer { name: String },
 }
 
 /// Connection settings for the inference backend.
