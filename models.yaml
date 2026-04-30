@@ -4,10 +4,10 @@
 models:
   - id: qwen3:4b
     provider: ollama
-    default: true
 
   - id: qwen3:8b
     provider: ollama
+    default: true
 
   - id: qwen3-coder:30b
     provider: ollama

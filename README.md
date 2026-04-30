@@ -26,6 +26,7 @@ See the [docs/](docs/) directory for in-depth research and architecture design:
 - [Model Routing](docs/07-model-routing.md) — Prescriptive, adaptive, and hybrid routing
 - [RAG Integration](docs/08-rag-integration.md) — Retrieval-Augmented Generation patterns
 - [Roadmap](docs/09-roadmap.md) — Phased implementation plan
+- [Investigations](docs/10-investigations.md) — Open questions on tool-use reliability
 
 ## Tech Stack
 
@@ -139,4 +140,44 @@ cargo run -p mv-cli -- "What git branch am I on?"
 # HTTP fetch
 cargo run -p mv-cli -- "What is the title of https://example.com?"
 ```
+
+### MCP Server Configuration
+
+Connect external MCP servers to extend the CLI with additional tools. Create an
+`mcp-servers.yaml` in the project root (or specify with `--mcp-config`):
+
+```yaml
+servers:
+  # Local stdio server (spawns a child process)
+  - name: filesystem
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    env:
+      NODE_ENV: production
+
+  # Remote HTTP server
+  - name: remote-rag
+    transport: http
+    url: http://192.168.1.100:8080/mcp
+```
+
+MCP tools merge with built-in tools into a single unified set. The model chooses
+the best tool for each task — built-in or MCP — transparently.
+
+```bash
+# Use with default config file (mcp-servers.yaml)
+cargo run -p mv-cli -- "List files in /tmp"
+
+# Use with explicit config path
+cargo run -p mv-cli -- --mcp-config path/to/servers.yaml "Search the database"
+```
+
+**Behavior:**
+
+- MCP server failures are logged and skipped — the CLI continues with remaining
+  servers and built-in tools
+- Built-in tools take precedence over MCP tools with the same name
+- All MCP connections are shut down gracefully on CLI exit
+- MCP tool calls appear in OpenTelemetry traces when `--otlp` is enabled
 

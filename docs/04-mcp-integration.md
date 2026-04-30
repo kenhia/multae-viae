@@ -192,3 +192,61 @@ Many pre-built MCP servers exist that can be connected immediately:
 
 See [github.com/modelcontextprotocol/servers](https://github.com/modelcontextprotocol/servers)
 for the full list of reference implementations.
+
+## Current Implementation
+
+MCP integration is implemented in `crates/mv-core/src/mcp/` with three modules:
+
+### Configuration (`config.rs`)
+
+MCP servers are configured via a YAML file (`mcp-servers.yaml` by default, or
+specified with `--mcp-config`):
+
+```yaml
+servers:
+  - name: filesystem
+    transport: stdio
+    command: npx
+    args: ["-y", "@anthropic/mcp-filesystem"]
+    env:
+      ALLOWED_DIRS: "/tmp:/home/user/docs"
+
+  - name: remote-rag
+    transport: http
+    url: http://192.168.1.100:8080/mcp
+```
+
+### Client (`client.rs`)
+
+The MCP client handles connection lifecycle:
+
+- **`connect_stdio()`** — Spawns a child process, performs MCP handshake, and
+  discovers tools via `McpClientHandler`
+- **`connect_http()`** — Connects to an HTTP endpoint using
+  `StreamableHttpClientTransport`
+- **`connect_all_servers()`** — Iterates all configured servers, connects each
+  one, and gracefully skips failures
+- **`shutdown_all()`** — Sends shutdown to all connected MCP servers on CLI exit
+
+All functions are instrumented with `#[tracing::instrument]` and emit
+OpenTelemetry spans with `mcp.server.name` and `mcp.transport` attributes.
+
+### Tool Registry (`registry.rs`)
+
+Tool collision detection ensures MCP tools merge cleanly with built-in tools:
+
+- Built-in tools (`file_list`, `file_read`, `shell_exec`, `http_get`) always
+  take precedence over MCP tools with the same name
+- Cross-server MCP tool name collisions are logged as warnings
+
+### Architecture
+
+The implementation uses rig-core's `ToolServer` pattern:
+
+1. Built-in tools are registered on a `ToolServer`
+2. The `ToolServer` returns a `ToolServerHandle`
+3. `McpClientHandler` connects to each MCP server, automatically registering
+   discovered tools on the shared handle
+4. The agent builder receives the handle via `.tool_server_handle(handle)`,
+   giving the model a single unified tool set
+5. On CLI exit, all MCP connections are shut down gracefully

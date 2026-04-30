@@ -7,13 +7,13 @@ use super::truncate_output;
 #[tracing::instrument(level = "info", skip(), fields(tool.name = "file_list"))]
 #[rig_tool(
     description = "List the contents of a directory",
-    params(path = "Directory path to list (default: current directory)")
+    params(path = "Directory path to list; use '.' for current directory")
 )]
-pub fn file_list(path: Option<String>) -> Result<String, ToolError> {
-    let dir = path.unwrap_or_else(|| ".".to_string());
+pub fn file_list(path: String) -> Result<String, ToolError> {
+    let dir = if path.is_empty() { "." } else { &path };
 
     let entries =
-        std::fs::read_dir(&dir).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+        std::fs::read_dir(dir).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
             format!("Cannot read directory '{dir}': {e}").into()
         })?;
 
@@ -38,7 +38,7 @@ mod tests {
 
     #[test]
     fn list_current_directory() {
-        let result = file_list(None).unwrap();
+        let result = file_list(".".to_string()).unwrap();
         // Current dir should have some content
         assert!(!result.is_empty());
     }
@@ -50,7 +50,7 @@ mod tests {
         std::fs::write(dir.path().join("b.txt"), "world").unwrap();
         std::fs::create_dir(dir.path().join("subdir")).unwrap();
 
-        let result = file_list(Some(dir.path().to_string_lossy().to_string())).unwrap();
+        let result = file_list(dir.path().to_string_lossy().to_string()).unwrap();
         assert!(result.contains("a.txt"));
         assert!(result.contains("b.txt"));
         assert!(result.contains("subdir/"));
@@ -58,14 +58,14 @@ mod tests {
 
     #[test]
     fn list_missing_directory() {
-        let result = file_list(Some("/nonexistent/path/xyz".to_string()));
+        let result = file_list("/nonexistent/path/xyz".to_string());
         assert!(result.is_err());
     }
 
     #[test]
     fn list_empty_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let result = file_list(Some(dir.path().to_string_lossy().to_string())).unwrap();
+        let result = file_list(dir.path().to_string_lossy().to_string()).unwrap();
         assert!(result.is_empty());
     }
 }

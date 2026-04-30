@@ -1,5 +1,6 @@
 use clap::Parser;
 use rig::completion::Prompt;
+use rig::tool::server::{ToolServer, ToolServerHandle};
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
@@ -32,6 +33,10 @@ struct Cli {
     #[arg(short, long)]
     config: Option<String>,
 
+    /// Path to MCP servers YAML config file [default: mcp-servers.yaml]
+    #[arg(long)]
+    mcp_config: Option<String>,
+
     /// Enable OTLP trace export [default endpoint: http://localhost:4318]
     #[arg(long, num_args = 0..=1, default_missing_value = "http://localhost:4318")]
     otlp: Option<String>,
@@ -45,6 +50,10 @@ struct Cli {
     verbose: u8,
 }
 
+#[tracing::instrument(name = "mv_cli_request", skip(cli), fields(
+    prompt = %cli.prompt,
+    model = cli.model.as_deref().unwrap_or("default"),
+))]
 async fn run(cli: &Cli) -> std::result::Result<String, mv_core::MvError> {
     let prompt = mv_core::validate_prompt(&cli.prompt)?;
 
@@ -74,15 +83,26 @@ async fn run(cli: &Cli) -> std::result::Result<String, mv_core::MvError> {
         "resolved model"
     );
 
+    // Set up agent ToolServer with built-in tools
+    let tool_server = ToolServer::new()
+        .tool(mv_core::tools::file_list::FileList)
+        .tool(mv_core::tools::file_read::FileRead)
+        .tool(mv_core::tools::shell_exec::ShellExec)
+        .tool(mv_core::tools::http_get::HttpGet);
+    let agent_handle = tool_server.run();
+
+    // Connect MCP servers to a separate handle, then register cleaned tools on the agent handle
+    let mcp_connections = connect_mcp_servers(cli.mcp_config.as_deref(), &agent_handle).await?;
+
     let response = match entry.provider.as_str() {
-        "ollama" => call_ollama(&entry.id, &endpoint, prompt).await?,
+        "ollama" => call_ollama(&entry.id, &endpoint, prompt, agent_handle).await?,
         "openai" => {
             let env_var = entry.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY");
             let api_key = std::env::var(env_var).map_err(|_| mv_core::MvError::ApiKeyMissing {
                 provider: entry.provider.clone(),
                 env_var: env_var.to_string(),
             })?;
-            call_openai(&entry.id, &endpoint, &api_key, prompt).await?
+            call_openai(&entry.id, &endpoint, &api_key, prompt, agent_handle).await?
         }
         other => {
             return Err(mv_core::MvError::CompletionFailed {
@@ -91,24 +111,55 @@ async fn run(cli: &Cli) -> std::result::Result<String, mv_core::MvError> {
         }
     };
 
+    // Gracefully shut down MCP connections
+    mv_core::mcp::client::shutdown_all(mcp_connections).await;
+
     info!(len = response.len(), "received response");
     Ok(response)
 }
 
-#[tracing::instrument(skip(prompt), fields(
+/// Load MCP config, connect to all servers on a dedicated MCP handle,
+/// then register cleaned tool wrappers on the agent handle.
+/// Returns live connections (for shutdown).
+async fn connect_mcp_servers(
+    mcp_config_path: Option<&str>,
+    agent_handle: &ToolServerHandle,
+) -> Result<Vec<mv_core::mcp::client::McpConnection>, mv_core::MvError> {
+    let mcp_config = mv_core::mcp::config::McpServersConfig::resolve(mcp_config_path)?;
+    match mcp_config {
+        Some(config) => {
+            // MCP tools are registered on a separate handle
+            let mcp_server = ToolServer::new();
+            let mcp_handle = mcp_server.run();
+
+            let connections =
+                mv_core::mcp::client::connect_all_servers(&config, mcp_handle.clone()).await;
+
+            // Register cleaned MCP tools (no $schema) on the agent handle
+            mv_core::mcp::registry::register_mcp_tools(&mcp_handle, agent_handle).await;
+
+            Ok(connections)
+        }
+        None => {
+            debug!("no MCP servers configured");
+            Ok(vec![])
+        }
+    }
+}
+
+#[tracing::instrument(name = "llm_completion", skip(handle), fields(
     gen_ai.system = "ollama",
     gen_ai.request.model = %model,
-    mv.model.locality = "local",
-    prompt.len = prompt.len(),
 ))]
 async fn call_ollama(
     model: &str,
     endpoint: &str,
     prompt: &str,
+    handle: ToolServerHandle,
 ) -> Result<String, mv_core::MvError> {
     use rig::client::{CompletionClient, Nothing};
 
-    info!(endpoint = %endpoint, "connecting to Ollama");
+    info!(model = %model, endpoint = %endpoint, locality = "local", "connecting to Ollama");
 
     let client = rig::providers::ollama::Client::builder()
         .api_key(Nothing)
@@ -121,10 +172,7 @@ async fn call_ollama(
     let agent = client
         .agent(model)
         .preamble(SYSTEM_PREAMBLE)
-        .tool(mv_core::tools::file_list::FileList)
-        .tool(mv_core::tools::file_read::FileRead)
-        .tool(mv_core::tools::shell_exec::ShellExec)
-        .tool(mv_core::tools::http_get::HttpGet)
+        .tool_server_handle(handle)
         .default_max_turns(10)
         .build();
 
@@ -137,21 +185,20 @@ async fn call_ollama(
     Ok(response)
 }
 
-#[tracing::instrument(skip(prompt, api_key), fields(
+#[tracing::instrument(name = "llm_completion", skip(handle, api_key), fields(
     gen_ai.system = "openai",
     gen_ai.request.model = %model,
-    mv.model.locality = "cloud",
-    prompt.len = prompt.len(),
 ))]
 async fn call_openai(
     model: &str,
     endpoint: &str,
     api_key: &str,
     prompt: &str,
+    handle: ToolServerHandle,
 ) -> Result<String, mv_core::MvError> {
     use rig::client::CompletionClient;
 
-    info!(endpoint = %endpoint, "connecting to OpenAI");
+    info!(model = %model, endpoint = %endpoint, locality = "cloud", "connecting to OpenAI");
 
     let client = rig::providers::openai::Client::builder()
         .api_key(api_key)
@@ -164,10 +211,7 @@ async fn call_openai(
     let agent = client
         .agent(model)
         .preamble(SYSTEM_PREAMBLE)
-        .tool(mv_core::tools::file_list::FileList)
-        .tool(mv_core::tools::file_read::FileRead)
-        .tool(mv_core::tools::shell_exec::ShellExec)
-        .tool(mv_core::tools::http_get::HttpGet)
+        .tool_server_handle(handle)
         .default_max_turns(10)
         .build();
 
