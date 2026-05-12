@@ -44,6 +44,25 @@ The heart of the system. Responsible for:
 - Supporting both prescriptive (DSL-defined) and autonomous (agent-decided)
   execution modes
 
+**Implementation** (`crates/mv-core/src/workflow/`):
+
+The DSL engine is implemented as a module within `mv-core`:
+
+- `types.rs` — Workflow, Step (prompt/tool/transform), Input, Output types
+  with `#[serde(deny_unknown_fields)]` for strict YAML parsing
+- `parser.rs` — YAML loading via `serde_yml` with error mapping
+- `validate.rs` — Structural validation (duplicate IDs, unresolvable refs,
+  circular references, template checks)
+- `template.rs` — Variable interpolation using `minijinja` with
+  `{{variable}}` syntax; supports inline templates and external template files
+- `engine.rs` — Sequential execution engine with `PromptExecutor` and
+  `ToolExecutor` traits for testability; handles error strategies
+  (skip/fail/retry), transform operations (`extract_json`), and
+  OpenTelemetry instrumentation
+
+CLI subcommands `workflow run` and `workflow validate` are exposed via
+`mv-cli` using `clap` subcommand groups.
+
 ```rust
 // Conceptual interface
 trait WorkflowEngine {

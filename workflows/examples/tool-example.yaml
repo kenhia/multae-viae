@@ -1,0 +1,35 @@
+name: tool-example
+version: "1.0"
+description: List files and summarize the project structure
+
+defaults:
+  model: qwen3:4b
+
+inputs:
+  - name: directory
+    type: string
+    default: "."
+    description: Directory to list
+
+steps:
+  - id: list
+    name: List Directory
+    type: tool
+    output: file_listing
+    tool: file_list
+    inputs:
+      path: "{{directory}}"
+    on_error: skip
+
+  - id: summarize
+    name: Summarize Structure
+    type: prompt
+    output: summary
+    template: |
+      Based on the following file listing, describe the project structure:
+
+      {{file_listing}}
+
+outputs:
+  - name: summary
+    from: summarize

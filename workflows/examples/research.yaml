@@ -1,0 +1,44 @@
+name: research-and-summarize
+version: "1.0"
+description: Research a topic and produce a structured summary
+
+defaults:
+  model: qwen3:4b
+  temperature: 0.7
+  max_tokens: 2048
+
+inputs:
+  - name: topic
+    type: string
+    required: true
+    description: The topic to research
+  - name: style
+    type: enum
+    values: [brief, detailed]
+    default: brief
+    description: Summary style
+
+steps:
+  - id: research
+    name: Create Research Plan
+    type: prompt
+    output: research_plan
+    template: |
+      Create a research plan for: {{topic}}
+      Style: {{style}}
+      List 3-5 key areas to investigate.
+
+  - id: summarize
+    name: Create Summary
+    type: prompt
+    output: summary
+    temperature: 0.3
+    template: |
+      Based on the following research plan, write a {{style}} summary about {{topic}}.
+
+      Research Plan:
+      {{research_plan}}
+
+outputs:
+  - name: summary
+    from: summarize

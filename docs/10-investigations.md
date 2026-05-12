@@ -76,3 +76,22 @@ more reliable.
 - [ ] Cost tracking: log estimated token costs for cloud calls
 - [ ] Hybrid routing: use local for simple queries, cloud for tool-heavy ones
   (ties into Phase 7 model routing)
+
+## Investigation: Large Step Output in Workflow Pipelines
+
+When a workflow step produces extremely large output (e.g., a tool returning
+a full file listing or a verbose model response), passing it as a template
+variable into a subsequent prompt step could exceed the model's context
+window. The existing `MAX_TOOL_OUTPUT_CHARS` truncation applies to direct
+tool calls but is not enforced on step-to-step output passing in the DSL
+engine.
+
+**Questions:**
+
+- Should step outputs be truncated before template interpolation?
+- Should the engine warn when a rendered prompt exceeds a configurable
+  context-size threshold?
+- Is this better handled per-step (explicit truncation transform) or
+  globally (engine-level safety net)?
+
+**Deferred from**: 005-dsl-engine (Phase 4: DSL Engine)
