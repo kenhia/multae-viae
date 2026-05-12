@@ -5,6 +5,7 @@ use serde::Deserialize;
 
 pub mod mcp;
 pub mod tools;
+pub mod workflow;
 
 /// Where a model runs.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -186,6 +187,31 @@ pub enum MvError {
 
     #[error("duplicate MCP server name: '{name}'")]
     McpDuplicateServer { name: String },
+
+    #[error("workflow file not found: {path}")]
+    WorkflowFileNotFound { path: String },
+
+    #[error("failed to parse workflow '{path}': {details}")]
+    WorkflowParseError { path: String, details: String },
+
+    #[error("validation failed: {details}")]
+    WorkflowValidationError { details: String },
+
+    #[error("step '{step}': {details}")]
+    WorkflowStepFailed { step: String, details: String },
+
+    #[error("required input '{name}' not provided")]
+    WorkflowInputMissing { name: String },
+
+    #[error("input '{name}' value '{value}' not in allowed values: [{allowed}]")]
+    WorkflowInputInvalid {
+        name: String,
+        value: String,
+        allowed: String,
+    },
+
+    #[error("step '{step}': template error: {details}")]
+    WorkflowTemplateError { step: String, details: String },
 }
 
 /// Connection settings for the inference backend.

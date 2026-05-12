@@ -78,13 +78,13 @@ $ cargo run -p mv-cli -- "What files are in the current directory?"
 **Goal**: Connect to MCP servers for external tool access.
 
 ### Tasks
-- [ ] Add `rmcp` dependency with client feature
-- [ ] Implement MCP server configuration (YAML)
-- [ ] Connect to stdio-based MCP servers (spawn child processes)
-- [ ] Merge MCP tools into the tool registry
-- [ ] Connect to HTTP-based MCP servers (for network services)
-- [ ] Test with reference MCP servers (filesystem, git)
-- [ ] Instrument MCP calls in telemetry
+- [x] Add `rmcp` dependency with client feature
+- [x] Implement MCP server configuration (YAML)
+- [x] Connect to stdio-based MCP servers (spawn child processes)
+- [x] Merge MCP tools into the tool registry
+- [x] Connect to HTTP-based MCP servers (for network services)
+- [x] Test with reference MCP servers (filesystem, git)
+- [x] Instrument MCP calls in telemetry
 
 ### Deliverable
 - Controller discovers and calls tools from MCP servers
@@ -97,13 +97,13 @@ $ cargo run -p mv-cli -- "What files are in the current directory?"
 **Goal**: Execute multi-step workflows defined in YAML.
 
 ### Tasks
-- [ ] Define DSL schema types in `mv-dsl`
-- [ ] Implement YAML parser with validation
-- [ ] Build workflow engine with sequential step execution
-- [ ] Add template engine for prompt interpolation (handlebars or minijinja)
-- [ ] Implement step output passing (output of step N → input of step N+1)
-- [ ] Add `prompt`, `tool`, and `transform` step types
-- [ ] Workflow execution traces in telemetry
+- [x] Define DSL schema types in `mv-core::workflow`
+- [x] Implement YAML parser with validation
+- [x] Build workflow engine with sequential step execution
+- [x] Add template engine for prompt interpolation (minijinja)
+- [x] Implement step output passing (output of step N → input of step N+1)
+- [x] Add `prompt`, `tool`, and `transform` step types
+- [x] Workflow execution traces in telemetry
 
 ### Deliverable
 ```bash
@@ -113,7 +113,38 @@ $ cargo run -p mv-cli -- workflow run workflows/research.yaml --input topic="Rus
 
 ---
 
-## Phase 5: Advanced Routing & RAG (Weeks 13-16)
+## Phase 4.5: TRT-LLM Provider (Weeks 13-14)
+
+**Goal**: Add TensorRT-LLM as a high-performance local inference provider
+alongside Ollama.
+
+See [TRT-LLM Integration Assessment](11-trt-llm-integration.md) for full
+analysis and rationale.
+
+### Tasks
+- [ ] Add `trtllm` provider to `Locality::from_provider()` → `Local`
+- [ ] Add `trtllm` default endpoint (`http://localhost:8000/v1`)
+- [ ] Route `trtllm` provider through OpenAI-compatible client in CLI
+- [ ] Add `trtllm-serve` health check integration
+- [ ] Extend models.yaml schema with optional TRT-LLM metadata
+- [ ] Add Triton model load/unload commands
+- [ ] Instrument TRT-LLM calls with provider-specific telemetry attributes
+- [ ] Update documentation (models.yaml examples, setup guide)
+- [ ] End-to-end test: workflow with TRT-LLM model
+
+### Deliverable
+```bash
+$ cargo run -p mv-cli -- -m llama-3_1-8b-fp8 "Explain Rust ownership"
+# → Response from TRT-LLM optimized model via trtllm-serve
+```
+
+### Key Dependencies
+- RTX 5090 with TRT-LLM engines built (via trt-llm-explore)
+- `trtllm-serve` running locally
+
+---
+
+## Phase 5: Advanced Routing & RAG (Weeks 15-18)
 
 **Goal**: Adaptive model routing and RAG integration.
 
@@ -133,7 +164,7 @@ $ cargo run -p mv-cli -- workflow run workflows/research.yaml --input topic="Rus
 
 ---
 
-## Phase 6: Always-On Agent (Weeks 17-20)
+## Phase 6: Always-On Agent (Weeks 19-22)
 
 **Goal**: Long-running agent service with API and monitoring capabilities.
 
@@ -153,7 +184,7 @@ $ cargo run -p mv-cli -- workflow run workflows/research.yaml --input topic="Rus
 
 ---
 
-## Phase 7: Polish & Dashboard Foundation (Weeks 21+)
+## Phase 7: Polish & Dashboard Foundation (Weeks 23+)
 
 **Goal**: Production-grade telemetry export and dashboard-ready APIs.
 

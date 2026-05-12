@@ -27,6 +27,7 @@ See the [docs/](docs/) directory for in-depth research and architecture design:
 - [RAG Integration](docs/08-rag-integration.md) — Retrieval-Augmented Generation patterns
 - [Roadmap](docs/09-roadmap.md) — Phased implementation plan
 - [Investigations](docs/10-investigations.md) — Open questions on tool-use reliability
+- [TRT-LLM Integration](docs/11-trt-llm-integration.md) — TensorRT-LLM provider assessment
 
 ## Tech Stack
 
@@ -61,18 +62,73 @@ just ci                                 # Format + clippy + test
 ### CLI Usage
 
 ```
-mv-cli [OPTIONS] <PROMPT>
+mv-cli [OPTIONS] <COMMAND>
+
+Commands:
+  prompt     Send a prompt to a model (default when no subcommand)
+  workflow   Manage and execute workflows
 
 Options:
-  -m, --model <MODEL>      Model name (from registry or built-in)
-  -e, --endpoint <URL>     Override model endpoint
-  -c, --config <PATH>      Path to models.yaml config file
-      --otlp [<ENDPOINT>]  Enable OTLP trace export [default: http://localhost:4318]
-  -j, --json               Output response as JSON object
-  -v, --verbose            Increase log verbosity (repeat for more: -vv)
-  -h, --help               Print help
-  -V, --version            Print version
+  -v, --verbose    Increase log verbosity (repeat for more: -vv)
+      --otlp [URL] Enable OTLP trace export [default: http://localhost:4318]
+  -j, --json       Output response as JSON object
+  -h, --help       Print help
+  -V, --version    Print version
 ```
+
+#### Prompt (default command)
+
+```bash
+mv-cli "What is Rust?"                    # Direct prompt
+mv-cli prompt "What is Rust?"             # Explicit subcommand
+mv-cli -m qwen3:8b "Explain async"        # Specify model
+mv-cli --json "Hello"                     # JSON output
+```
+
+#### Workflows
+
+Define multi-step workflows in YAML and execute them from the CLI:
+
+```bash
+# Run a workflow
+mv-cli workflow run workflows/examples/research.yaml --input topic="Rust async"
+
+# Validate a workflow file
+mv-cli workflow validate workflows/examples/research.yaml
+
+# JSON output
+mv-cli --json workflow run workflow.yaml --input topic="AI"
+```
+
+Example workflow file (`workflows/examples/research.yaml`):
+
+```yaml
+name: research-and-summarize
+version: "1.0"
+defaults:
+  model: qwen3:4b
+inputs:
+  - name: topic
+    type: string
+    required: true
+steps:
+  - id: research
+    type: prompt
+    output: research_plan
+    template: "Create a research plan for: {{topic}}"
+  - id: summarize
+    type: prompt
+    output: summary
+    template: "Summarize: {{research_plan}}"
+outputs:
+  - name: summary
+    from: summarize
+```
+
+Workflows support three step types: `prompt` (LLM calls), `tool` (built-in or
+MCP tool invocations with skip/fail/retry error handling), and `transform`
+(data extraction like `extract_json`). Template variables use `{{var}}` syntax
+with step outputs shadowing workflow inputs.
 
 ### Model Configuration
 
