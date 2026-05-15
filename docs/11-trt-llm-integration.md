@@ -1,5 +1,12 @@
 # TensorRT-LLM Integration Assessment
 
+> **Implementation note (sprint 006):** The initial implementation uses an
+> OpenAI-compatible proxy from `trt-llm-explore` on port 8003 (not
+> `trtllm-serve` on port 8000 as proposed below). The proxy normalizes
+> array-format content, supports SSE streaming, tool calling, and approximate
+> token counts. Rig's `CompletionsClient` is used instead of the default
+> `openai::Client` to target `/v1/chat/completions`.
+
 ## Context
 
 After completing Phase 4 (DSL Engine), we are evaluating whether to integrate

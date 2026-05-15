@@ -258,9 +258,8 @@ async fn execute_tool_with_error_handling<T: ToolExecutor>(
         ErrorAction::Retry => {
             let retry = ts.retry.as_ref();
             let max_attempts = retry.map_or(3, |r| r.max_attempts);
-            let is_exponential = retry.is_none_or(|r| {
-                r.backoff == super::types::BackoffStrategy::Exponential
-            });
+            let is_exponential =
+                retry.is_none_or(|r| r.backoff == super::types::BackoffStrategy::Exponential);
 
             for attempt in 1..=max_attempts {
                 match execute().await {

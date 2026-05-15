@@ -114,6 +114,33 @@ appear on the span.
 
 ---
 
+### User Story 5 - Tool Calling Through TRT-LLM (Priority: P5)
+
+A user sends a prompt to a TRT-LLM model that has tool parser support (e.g.,
+Qwen3 or DeepSeek served via `trtllm-serve --tool_parser auto`). The built-in
+tools (FileList, FileRead, ShellExec, HttpGet) and any MCP tools are available
+to the model, just as they are for Ollama and OpenAI providers.
+
+**Why this priority**: Tool calling is already wired through `call_openai()`,
+which TRT-LLM reuses. This story validates that the passthrough works
+end-to-end and documents any model-specific caveats.
+
+**Independent Test**: Start `trtllm-serve` with a tool-capable model and
+`--tool_parser auto`, send a prompt that requires tool use (e.g., "List the
+files in the current directory"), and verify the model invokes the tool and
+incorporates the result.
+
+**Acceptance Scenarios**:
+
+1. **Given** a `trtllm` model with tool parser support is served, **When** the
+   user sends a prompt requiring tool use, **Then** the model invokes built-in
+   tools and returns a response incorporating tool results.
+2. **Given** a `trtllm` model without tool parser support is served, **When**
+   the user sends a prompt requiring tool use, **Then** the model responds
+   without tool calls (graceful degradation, no crash).
+
+---
+
 ### Edge Cases
 
 - What happens when the TRT-LLM server is running but no model is loaded? The
@@ -142,10 +169,11 @@ appear on the span.
   (`Locality::Local`)
 - **FR-005**: System MUST send a non-empty API key string when calling
   `trtllm-serve` (the server accepts any value but requires the header)
-- **FR-006**: System MUST support optional TRT-LLM metadata fields in model
-  entries: `architecture`, `quant`, `expected_vram_gb`
+- **FR-006**: System MUST support optional model metadata fields in model
+  entries: `served_name` (server-side model name sent in API calls instead of
+  `id`), `architecture`, `quant`, `expected_vram_gb`
 - **FR-007**: System MUST perform a health check against the TRT-LLM endpoint
-  before sending the first prompt to a `trtllm` model
+  before sending the first prompt per CLI invocation to a `trtllm` model
 - **FR-008**: System MUST include `gen_ai.system = "trtllm"` in OpenTelemetry
   spans for TRT-LLM model calls
 - **FR-009**: System MUST support TRT-LLM models in workflow prompt steps (same
@@ -153,13 +181,16 @@ appear on the span.
 - **FR-010**: System MUST surface connection errors and server errors with
   actionable messages (e.g., "TRT-LLM server not reachable — start it with
   `trtllm-serve <model>`")
-- **FR-011**: System MUST support tool-calling through TRT-LLM models that have
-  tool parser support (Qwen3, DeepSeek)
+- **FR-011**: System MUST support tool-calling through TRT-LLM models that
+  have tool parser support (e.g., Qwen3, DeepSeek). Since `call_openai()` is
+  reused, tool definitions are passed through automatically; the requirement
+  is to verify this works end-to-end with a `trtllm` provider model.
 
 ### Key Entities
 
-- **ModelEntry**: Extended with optional fields `architecture` (String), `quant`
-  (String), `expected_vram_gb` (u32) for TRT-LLM metadata
+- **ModelEntry**: Extended with optional fields `served_name` (String, for
+  server-side model name mapping), `architecture` (String), `quant` (String),
+  `expected_vram_gb` (u32) for provider metadata
 - **Provider**: Logical grouping — `ollama`, `openai`, `trtllm` — that
   determines API protocol, default endpoint, and locality
 
@@ -172,7 +203,7 @@ appear on the span.
 - **SC-002**: Workflows execute prompt steps against TRT-LLM models without
   modification to workflow YAML (only the model ID changes)
 - **SC-003**: When the TRT-LLM server is unavailable, the user receives an
-  error within 5 seconds (not a 30-second timeout)
+  error within 2 seconds (not a 30-second timeout)
 - **SC-004**: TRT-LLM model calls appear in OpenTelemetry traces with
   distinguishable provider attributes
 - **SC-005**: All existing tests continue to pass (no regression in Ollama or

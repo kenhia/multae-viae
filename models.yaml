@@ -16,3 +16,12 @@ models:
   # - id: gpt-4o-mini
   #   provider: openai
   #   api_key_env: OPENAI_API_KEY
+
+  # TRT-LLM via OpenAI-compatible proxy (start with: just up in trt-llm-explore)
+  # id is a short alias; served_name must match the proxy's model name
+  - id: llama-fp8
+    provider: trtllm
+    served_name: llama-3_1-8b-fp8
+    architecture: llama
+    quant: fp8
+    expected_vram_gb: 9

@@ -60,6 +60,8 @@ pub async fn connect_stdio(
 
     let mut cmd = tokio::process::Command::new(command);
     cmd.args(&config.args);
+    // Suppress MCP server diagnostic output from reaching the user's terminal
+    cmd.stderr(std::process::Stdio::null());
     // Suppress npm update notices when spawning npx-based MCP servers
     cmd.env("NPM_CONFIG_UPDATE_NOTIFIER", "false");
     for (k, v) in &config.env {
