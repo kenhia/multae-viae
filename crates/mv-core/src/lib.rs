@@ -5,6 +5,7 @@ use serde::Deserialize;
 
 pub mod mcp;
 pub mod tools;
+pub mod trtllm;
 pub mod workflow;
 
 /// Where a model runs.
@@ -19,7 +20,7 @@ impl Locality {
     /// Infer locality from provider name when not explicitly set.
     pub fn from_provider(provider: &str) -> Self {
         match provider {
-            "ollama" => Locality::Local,
+            "ollama" | "trtllm" => Locality::Local,
             _ => Locality::Cloud,
         }
     }
@@ -45,6 +46,10 @@ pub struct ModelEntry {
     pub endpoint: Option<String>,
     #[serde(default)]
     pub default: bool,
+    pub served_name: Option<String>,
+    pub architecture: Option<String>,
+    pub quant: Option<String>,
+    pub expected_vram_gb: Option<u32>,
 }
 
 impl ModelEntry {
@@ -62,8 +67,14 @@ impl ModelEntry {
             .unwrap_or_else(|| match self.provider.as_str() {
                 "ollama" => "http://localhost:11434".to_string(),
                 "openai" => "https://api.openai.com/v1".to_string(),
+                "trtllm" => "http://localhost:8003/v1".to_string(),
                 _ => "http://localhost:8080".to_string(),
             })
+    }
+
+    /// Model name sent to the API — `served_name` if set, otherwise `id`.
+    pub fn model_name(&self) -> &str {
+        self.served_name.as_deref().unwrap_or(&self.id)
     }
 }
 
@@ -135,6 +146,10 @@ impl ModelRegistry {
                 api_key_env: None,
                 endpoint: None,
                 default: true,
+                served_name: None,
+                architecture: None,
+                quant: None,
+                expected_vram_gb: None,
             }],
         }
     }
@@ -158,8 +173,8 @@ pub enum MvError {
     #[error("Prompt cannot be empty.")]
     EmptyPrompt,
 
-    #[error("Cannot reach model backend at {endpoint}. Is Ollama running?")]
-    BackendUnreachable { endpoint: String },
+    #[error("Cannot reach model backend at {endpoint}. {hint}")]
+    BackendUnreachable { endpoint: String, hint: String },
 
     #[error("Model '{model}' not found. Run: ollama pull {model}")]
     ModelNotFound { model: String },
@@ -259,6 +274,7 @@ mod tests {
     fn error_backend_unreachable_message() {
         let err = MvError::BackendUnreachable {
             endpoint: "http://localhost:11434".to_string(),
+            hint: "Is Ollama running?".to_string(),
         };
         assert_eq!(
             err.to_string(),
@@ -464,6 +480,10 @@ models:
             api_key_env: None,
             endpoint: None,
             default: false,
+            served_name: None,
+            architecture: None,
+            quant: None,
+            expected_vram_gb: None,
         };
         assert_eq!(entry.locality(), Locality::Local);
     }
@@ -477,6 +497,10 @@ models:
             api_key_env: None,
             endpoint: None,
             default: false,
+            served_name: None,
+            architecture: None,
+            quant: None,
+            expected_vram_gb: None,
         };
         assert_eq!(ollama.endpoint(), "http://localhost:11434");
 
@@ -487,6 +511,10 @@ models:
             api_key_env: None,
             endpoint: None,
             default: false,
+            served_name: None,
+            architecture: None,
+            quant: None,
+            expected_vram_gb: None,
         };
         assert_eq!(openai.endpoint(), "https://api.openai.com/v1");
     }
@@ -500,5 +528,106 @@ models:
             env_var: "OPENAI_API_KEY".to_string(),
         };
         assert!(err.to_string().contains("OPENAI_API_KEY"));
+    }
+
+    // --- TRT-LLM provider tests (T007) ---
+
+    #[test]
+    fn locality_from_provider_trtllm() {
+        assert_eq!(Locality::from_provider("trtllm"), Locality::Local);
+    }
+
+    #[test]
+    fn model_entry_endpoint_default_trtllm() {
+        let entry = ModelEntry {
+            id: "llama-fp8".to_string(),
+            provider: "trtllm".to_string(),
+            locality: None,
+            api_key_env: None,
+            endpoint: None,
+            default: false,
+            served_name: None,
+            architecture: None,
+            quant: None,
+            expected_vram_gb: None,
+        };
+        assert_eq!(entry.endpoint(), "http://localhost:8003/v1");
+    }
+
+    #[test]
+    fn model_entry_model_name_uses_served_name() {
+        let entry = ModelEntry {
+            id: "llama-fp8".to_string(),
+            provider: "trtllm".to_string(),
+            locality: None,
+            api_key_env: None,
+            endpoint: None,
+            default: false,
+            served_name: Some("meta-llama/Meta-Llama-3.1-8B-Instruct".to_string()),
+            architecture: None,
+            quant: None,
+            expected_vram_gb: None,
+        };
+        assert_eq!(entry.model_name(), "meta-llama/Meta-Llama-3.1-8B-Instruct");
+    }
+
+    #[test]
+    fn model_entry_model_name_falls_back_to_id() {
+        let entry = ModelEntry {
+            id: "llama-fp8".to_string(),
+            provider: "trtllm".to_string(),
+            locality: None,
+            api_key_env: None,
+            endpoint: None,
+            default: false,
+            served_name: None,
+            architecture: None,
+            quant: None,
+            expected_vram_gb: None,
+        };
+        assert_eq!(entry.model_name(), "llama-fp8");
+    }
+
+    #[test]
+    fn model_entry_deserialize_trtllm_with_metadata() {
+        let yaml = r#"
+models:
+  - id: llama-fp8
+    provider: trtllm
+    served_name: meta-llama/Meta-Llama-3.1-8B-Instruct
+    architecture: llama
+    quant: fp8
+    expected_vram_gb: 9
+"#;
+        let registry = ModelRegistry::from_yaml(yaml, "test").unwrap();
+        let entry = registry.get("llama-fp8").unwrap();
+        assert_eq!(entry.provider, "trtllm");
+        assert_eq!(
+            entry.served_name.as_deref(),
+            Some("meta-llama/Meta-Llama-3.1-8B-Instruct")
+        );
+        assert_eq!(entry.architecture.as_deref(), Some("llama"));
+        assert_eq!(entry.quant.as_deref(), Some("fp8"));
+        assert_eq!(entry.expected_vram_gb, Some(9));
+        assert_eq!(entry.locality(), Locality::Local);
+        assert_eq!(entry.endpoint(), "http://localhost:8003/v1");
+        assert_eq!(entry.model_name(), "meta-llama/Meta-Llama-3.1-8B-Instruct");
+    }
+
+    #[test]
+    fn model_entry_deserialize_trtllm_minimal() {
+        let yaml = r#"
+models:
+  - id: llama-3_1-8b-fp8
+    provider: trtllm
+"#;
+        let registry = ModelRegistry::from_yaml(yaml, "test").unwrap();
+        let entry = registry.get("llama-3_1-8b-fp8").unwrap();
+        assert_eq!(entry.provider, "trtllm");
+        assert!(entry.served_name.is_none());
+        assert!(entry.architecture.is_none());
+        assert!(entry.quant.is_none());
+        assert!(entry.expected_vram_gb.is_none());
+        assert_eq!(entry.model_name(), "llama-3_1-8b-fp8");
     }
 }

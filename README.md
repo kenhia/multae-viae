@@ -5,7 +5,7 @@ tools, and services to act as an always-on AI assistant.
 
 ## Vision
 
-- **Local-first**: Models run locally via Ollama/mistral.rs, with cloud fallback
+- **Local-first**: Models run locally via Ollama/TensorRT-LLM/mistral.rs, with cloud fallback
 - **Tool-aware**: MCP protocol integration for extensible tool use
 - **Multi-model**: Dynamic model routing — right model for each task
 - **Observable**: First-class OpenTelemetry telemetry for a companion dashboard
@@ -35,7 +35,7 @@ See the [docs/](docs/) directory for in-depth research and architecture design:
 |-------|-----------|
 | Language | Rust |
 | Agent Framework | [Rig](https://github.com/0xPlaygrounds/rig) (`rig-core`) |
-| Local Inference | [Ollama](https://ollama.com/) + [mistral.rs](https://github.com/EricLBuehler/mistral.rs) |
+| Local Inference | [Ollama](https://ollama.com/) + [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM) (`trtllm-serve`) + [mistral.rs](https://github.com/EricLBuehler/mistral.rs) |
 | MCP | [RMCP](https://github.com/modelcontextprotocol/rust-sdk) |
 | Telemetry | [OpenTelemetry](https://github.com/open-telemetry/opentelemetry-rust) + `tracing` |
 | ML Framework | [Candle](https://github.com/huggingface/candle) (HuggingFace) |
@@ -141,6 +141,16 @@ models:
     default: true
   - id: qwen3:8b
     provider: ollama
+  # TRT-LLM provider (start OpenAI proxy from trt-llm-explore first)
+  # - id: llama-3_1-8b-fp8
+  #   provider: trtllm
+  # With metadata and served_name mapping:
+  # - id: llama-fp8
+  #   provider: trtllm
+  #   served_name: meta-llama/Meta-Llama-3.1-8B-Instruct
+  #   architecture: llama
+  #   quant: fp8
+  #   expected_vram_gb: 9
   # Cloud provider (set OPENAI_API_KEY env var)
   # - id: gpt-4o-mini
   #   provider: openai

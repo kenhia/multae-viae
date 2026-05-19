@@ -122,25 +122,65 @@ See [TRT-LLM Integration Assessment](11-trt-llm-integration.md) for full
 analysis and rationale.
 
 ### Tasks
-- [ ] Add `trtllm` provider to `Locality::from_provider()` → `Local`
-- [ ] Add `trtllm` default endpoint (`http://localhost:8000/v1`)
-- [ ] Route `trtllm` provider through OpenAI-compatible client in CLI
-- [ ] Add `trtllm-serve` health check integration
-- [ ] Extend models.yaml schema with optional TRT-LLM metadata
-- [ ] Add Triton model load/unload commands
-- [ ] Instrument TRT-LLM calls with provider-specific telemetry attributes
-- [ ] Update documentation (models.yaml examples, setup guide)
-- [ ] End-to-end test: workflow with TRT-LLM model
+- [x] Add `trtllm` provider to `Locality::from_provider()` → `Local`
+- [x] Add `trtllm` default endpoint (`http://localhost:8003/v1`)
+- [x] Route `trtllm` provider through OpenAI Chat Completions client in CLI
+- [x] Add health check integration (`/health` endpoint, 2s timeout)
+- [x] Extend `ModelEntry` with optional TRT-LLM metadata (`served_name`,
+  `architecture`, `quant`, `expected_vram_gb`)
+- [x] Add provider-specific error hints in `BackendUnreachable`
+- [x] Instrument TRT-LLM calls with `gen_ai.system = "trtllm"` telemetry
+- [x] Ensure MCP connections shut down on error paths (terminal fix)
+- [x] Update documentation (models.yaml, README, architecture docs)
+- [x] Integration tests for trtllm provider (6 tests)
 
 ### Deliverable
 ```bash
-$ cargo run -p mv-cli -- -m llama-3_1-8b-fp8 "Explain Rust ownership"
-# → Response from TRT-LLM optimized model via trtllm-serve
+$ cargo run -p mv-cli -- -m llama-fp8 "Explain Rust ownership"
+# → Response from TRT-LLM optimized model via OpenAI-compatible proxy
 ```
 
 ### Key Dependencies
 - RTX 5090 with TRT-LLM engines built (via trt-llm-explore)
-- `trtllm-serve` running locally
+- trt-llm-explore OpenAI proxy running (`just up-openai && just load <model>`)
+
+### Lessons Learned
+- Rig v0.35 `openai::Client` defaults to the **Responses API** (`/v1/responses`),
+  not Chat Completions. Use `openai::CompletionsClient` for OpenAI-compatible
+  proxies that only implement `/v1/chat/completions`.
+- MCP stdio servers inherit the terminal; if the process exits before
+  `shutdown_all()`, the child can corrupt terminal state. Always shut down MCP
+  connections before propagating errors.
+
+---
+
+## Phase 4.5.1: TRT-LLM Streaming & Hardening
+
+**Goal**: Wire up streaming responses and improve robustness for TRT-LLM as a
+first-class local inference backend.
+
+The trt-llm-explore proxy now supports SSE streaming, tool calling, and
+approximate token counts. This phase adds client-side support.
+
+### Tasks
+- [ ] Add streaming support for trtllm provider (`stream_prompt()` using
+  Rig's SSE streaming with `CompletionsClient`)
+- [ ] Surface token usage from TRT-LLM responses in telemetry spans
+  (`gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`)
+- [ ] Integration-test tool calling through TRT-LLM (verify agent can call
+  built-in tools like `file_list` via the proxy)
+- [ ] Add `--stream` CLI flag for interactive streaming output
+- [ ] Improve error messages when model is not loaded (proxy returns 502 →
+  detect and suggest `just load <model>`)
+- [ ] Configure proper stop sequences per provider to prevent runaway
+  generation (test against all models in TRT-LLM registry)
+- [ ] End-to-end test: workflow with TRT-LLM model step
+
+### Deliverable
+```bash
+$ cargo run -p mv-cli -- -m llama-fp8 --stream "Explain Rust ownership"
+# → Tokens stream to terminal as they arrive from TRT-LLM
+```
 
 ---
 

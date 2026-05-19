@@ -153,26 +153,30 @@ async fn run_prompt(
     // Connect MCP servers to a separate handle, then register cleaned tools on the agent handle
     let mcp_connections = connect_mcp_servers(args.mcp_config.as_deref(), &agent_handle).await?;
 
-    let response = match entry.provider.as_str() {
-        "ollama" => call_ollama(&entry.id, &endpoint, prompt, agent_handle).await?,
+    let result = match entry.provider.as_str() {
+        "ollama" => call_ollama(&entry.id, &endpoint, prompt, agent_handle).await,
         "openai" => {
             let env_var = entry.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY");
-            let api_key = std::env::var(env_var).map_err(|_| mv_core::MvError::ApiKeyMissing {
-                provider: entry.provider.clone(),
-                env_var: env_var.to_string(),
-            })?;
-            call_openai(&entry.id, &endpoint, &api_key, prompt, agent_handle).await?
+            match std::env::var(env_var) {
+                Ok(api_key) => {
+                    call_openai(&entry.id, &endpoint, &api_key, prompt, agent_handle).await
+                }
+                Err(_) => Err(mv_core::MvError::ApiKeyMissing {
+                    provider: entry.provider.clone(),
+                    env_var: env_var.to_string(),
+                }),
+            }
         }
-        other => {
-            return Err(mv_core::MvError::CompletionFailed {
-                details: format!("unsupported provider: {other}"),
-            });
-        }
+        "trtllm" => call_trtllm(entry, &endpoint, prompt, agent_handle).await,
+        other => Err(mv_core::MvError::CompletionFailed {
+            details: format!("unsupported provider: {other}"),
+        }),
     };
 
-    // Gracefully shut down MCP connections
+    // Always shut down MCP connections, even on error
     mv_core::mcp::client::shutdown_all(mcp_connections).await;
 
+    let response = result?;
     info!(len = response.len(), "received response");
     Ok(response)
 }
@@ -226,6 +230,7 @@ async fn call_ollama(
         .build()
         .map_err(|e| mv_core::MvError::BackendUnreachable {
             endpoint: format!("{endpoint}: {e}"),
+            hint: "Is Ollama running?".to_string(),
         })?;
 
     let agent = client
@@ -238,7 +243,7 @@ async fn call_ollama(
     info!("sending prompt to model");
     let response = agent.prompt(prompt).await.map_err(|e| {
         let msg = e.to_string();
-        classify_rig_error(&msg, model, endpoint)
+        classify_rig_error(&msg, model, endpoint, "Is Ollama running?")
     })?;
 
     Ok(response)
@@ -265,6 +270,7 @@ async fn call_openai(
         .build()
         .map_err(|e| mv_core::MvError::BackendUnreachable {
             endpoint: format!("{endpoint}: {e}"),
+            hint: "Check the endpoint URL.".to_string(),
         })?;
 
     let agent = client
@@ -277,13 +283,80 @@ async fn call_openai(
     info!("sending prompt to model");
     let response = agent.prompt(prompt).await.map_err(|e| {
         let msg = e.to_string();
-        classify_rig_error(&msg, model, endpoint)
+        debug!(raw_error = %msg, "openai prompt failed");
+        classify_rig_error(&msg, model, endpoint, "Check the endpoint URL.")
     })?;
 
     Ok(response)
 }
 
-fn classify_rig_error(msg: &str, model: &str, endpoint: &str) -> mv_core::MvError {
+#[tracing::instrument(name = "llm_completion", skip(handle), fields(
+    gen_ai.system = "trtllm",
+    gen_ai.request.model = %entry.model_name(),
+    trtllm.architecture = entry.architecture.as_deref().unwrap_or(""),
+    trtllm.quant = entry.quant.as_deref().unwrap_or(""),
+    trtllm.expected_vram_gb = entry.expected_vram_gb.unwrap_or(0),
+))]
+async fn call_trtllm(
+    entry: &mv_core::ModelEntry,
+    endpoint: &str,
+    prompt: &str,
+    handle: ToolServerHandle,
+) -> Result<String, mv_core::MvError> {
+    let trtllm_hint = "Start the server with: trtllm-serve <model-path>".to_string();
+
+    // Health check before sending the prompt
+    let health = mv_core::trtllm::health::check_health(endpoint).await;
+    match health {
+        mv_core::trtllm::health::HealthCheckResult::Healthy => {}
+        mv_core::trtllm::health::HealthCheckResult::Unhealthy { status, body } => {
+            return Err(mv_core::MvError::BackendUnreachable {
+                endpoint: endpoint.to_string(),
+                hint: format!("Server returned {status}: {body}. {trtllm_hint}"),
+            });
+        }
+        mv_core::trtllm::health::HealthCheckResult::Unreachable { error } => {
+            return Err(mv_core::MvError::BackendUnreachable {
+                endpoint: endpoint.to_string(),
+                hint: format!("TRT-LLM server not reachable ({error}). {trtllm_hint}"),
+            });
+        }
+    }
+
+    let model_name = entry.model_name();
+    info!(model = %model_name, endpoint = %endpoint, locality = "local", "connecting to TRT-LLM");
+
+    // Use the Chat Completions API (not the Responses API) because
+    // OpenAI-compatible proxies typically only implement /v1/chat/completions.
+    use rig::client::CompletionClient;
+
+    let client = rig::providers::openai::CompletionsClient::builder()
+        .api_key("tensorrt_llm")
+        .base_url(endpoint)
+        .build()
+        .map_err(|e| mv_core::MvError::BackendUnreachable {
+            endpoint: format!("{endpoint}: {e}"),
+            hint: trtllm_hint.clone(),
+        })?;
+
+    let agent = client
+        .agent(model_name)
+        .preamble(SYSTEM_PREAMBLE)
+        .tool_server_handle(handle)
+        .default_max_turns(10)
+        .build();
+
+    info!("sending prompt to model");
+    let response = agent.prompt(prompt).await.map_err(|e| {
+        let msg = e.to_string();
+        debug!(raw_error = %msg, "trtllm prompt failed");
+        classify_rig_error(&msg, model_name, endpoint, &trtllm_hint)
+    })?;
+
+    Ok(response)
+}
+
+fn classify_rig_error(msg: &str, model: &str, endpoint: &str, hint: &str) -> mv_core::MvError {
     if msg.contains("not found") || (msg.contains("model") && msg.contains("pull")) {
         mv_core::MvError::ModelNotFound {
             model: model.to_string(),
@@ -297,6 +370,7 @@ fn classify_rig_error(msg: &str, model: &str, endpoint: &str) -> mv_core::MvErro
     {
         mv_core::MvError::BackendUnreachable {
             endpoint: endpoint.to_string(),
+            hint: hint.to_string(),
         }
     } else {
         mv_core::MvError::CompletionFailed {
@@ -506,10 +580,12 @@ async fn run_workflow(args: &WorkflowRunArgs, json: bool) -> Result<(), mv_core:
         &tool_exec,
         workflow_dir,
     )
-    .await?;
+    .await;
 
-    // Shut down MCP
+    // Always shut down MCP connections, even on error
     mv_core::mcp::client::shutdown_all(mcp_connections).await;
+
+    let result = result?;
 
     // Print outputs
     if json {
@@ -599,6 +675,7 @@ impl mv_core::workflow::engine::PromptExecutor for RigPromptExecutor {
                 )
                 .await
             }
+            "trtllm" => call_trtllm(entry, &endpoint, prompt_text, self.agent_handle.clone()).await,
             other => Err(mv_core::MvError::CompletionFailed {
                 details: format!("unsupported provider: {other}"),
             }),

@@ -128,9 +128,21 @@ Abstraction over multiple inference providers:
 | Backend | Transport | Use Case |
 |---------|-----------|----------|
 | Ollama | HTTP API (localhost:11434) | Primary local inference, model management |
+| TensorRT-LLM | OpenAI-compatible API (localhost:8003/v1) | High-performance local GPU inference via OpenAI-compatible proxy |
 | mistral.rs | Embedded Rust library | High-performance embedded inference |
 | OpenAI-compatible | HTTP API | Cloud fallback (OpenAI, Anthropic, etc.) |
 | Rig providers | HTTP API | 20+ providers via unified interface |
+
+**TRT-LLM Provider** (`crates/mv-core/src/trtllm/`):
+
+The TRT-LLM provider uses Rig's `CompletionsClient` (not the default
+`openai::Client` which targets the Responses API) since the TRT-LLM proxy exposes
+an OpenAI-compatible `/v1/chat/completions` endpoint. The provider module adds:
+
+- `health.rs` — Pre-prompt health check against `/health` endpoint (2s timeout)
+- Provider dispatch in `mv-cli` with `call_trtllm()` wrapper for telemetry
+- `gen_ai.system = "trtllm"` span attribute for OpenTelemetry traces
+- `served_name` field on `ModelEntry` for HuggingFace path → short name mapping
 
 #### RAG Client
 
