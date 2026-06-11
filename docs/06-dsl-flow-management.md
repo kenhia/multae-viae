@@ -56,25 +56,21 @@ steps:
       Output a numbered list of research questions.
     output: research_plan
 
-  - id: search
-    name: Search for Information
+  - id: fetch
+    name: Fetch Reference Material
     type: tool
-    tool: web_search
+    tool: http_get               # Built-in tool (or any registered MCP tool)
     inputs:
-      query: "{{topic}} {{research_plan}}"
-      limit: 10
+      url: "https://en.wikipedia.org/wiki/{{topic}}"
     output: search_results
 
   - id: analyze
     name: Analyze Results
     type: prompt
-    model:
-      prefer: [qwen3:8b, gpt-4]
-      strategy: adaptive
-      constraints:
-        min_context_window: 8192
+    model: qwen3:8b              # Exact model id only; model-preference
+                                 # objects are not yet implemented (Phase 5)
     template: |
-      Based on these search results, analyze the key findings:
+      Based on this reference material, analyze the key findings:
       
       {{search_results}}
       
@@ -122,26 +118,39 @@ outputs:
 
 #### `tool` — Tool Invocation
 
+Tool steps execute against the same merged built-in + MCP tool set the
+agent sees.
+
 ```yaml
-- id: search
+- id: fetch
   type: tool
-  tool: web_search           # Tool name (from MCP or built-in)
+  tool: http_get             # Tool name (built-in or MCP)
   inputs:
-    query: "{{search_query}}"
-    limit: 5
-  output: search_results
-  on_error: skip             # skip | fail | retry
+    url: "https://example.com/{{page}}"
+  output: page_body
+  on_error: retry            # skip | fail | retry
   retry:
-    max_attempts: 3
-    backoff: exponential
+    max_attempts: 3          # must be >= 1 (validated)
+    backoff: exponential     # exponential | fixed
+    base_delay_ms: 100       # optional; default 100, delay capped at 30s
 ```
 
+Retry semantics: only **transient** errors (backend unreachable, completion
+failure, tool/MCP call failure) are re-attempted — permanent failures
+(validation errors, missing inputs, config mistakes) fail immediately
+regardless of `on_error: retry`. Note that each retry **re-executes the
+tool**, side effects included: `shell_exec`, or `http_get` against a
+non-idempotent endpoint, runs again on every attempt.
+
 #### `transform` — Data Transformation
+
+`extract_json` is currently the only transform operation; unknown operations
+are rejected at validation.
 
 ```yaml
 - id: extract
   type: transform
-  operation: extract_json    # Built-in transform
+  operation: extract_json    # Built-in transform (the only one today)
   input: "{{raw_response}}"
   schema:                    # Expected JSON schema
     type: object
@@ -151,7 +160,7 @@ outputs:
   output: structured_data
 ```
 
-#### `branch` — Conditional Execution
+#### `branch` — Conditional Execution **(Not yet implemented — planned Phase 5/6)**
 
 ```yaml
 - id: check_complexity
@@ -171,7 +180,7 @@ outputs:
       output: detailed_analysis
 ```
 
-#### `parallel` — Concurrent Execution
+#### `parallel` — Concurrent Execution **(Not yet implemented — planned Phase 5/6)**
 
 ```yaml
 - id: multi_search
@@ -192,7 +201,7 @@ outputs:
     docs: doc_results
 ```
 
-#### `loop` — Iterative Execution
+#### `loop` — Iterative Execution **(Not yet implemented — planned Phase 5/6)**
 
 ```yaml
 - id: refine
@@ -212,7 +221,7 @@ outputs:
   exit_condition: "{{evaluation.score}} >= 8"
 ```
 
-#### `workflow` — Nested Workflow
+#### `workflow` — Nested Workflow **(Not yet implemented — planned Phase 5/6)**
 
 ```yaml
 - id: sub_task
@@ -225,17 +234,21 @@ outputs:
 
 ### Model Specification
 
-Models can be specified at different levels of specificity:
+**Implemented today**: an exact model id string, resolved against the
+`models.yaml` registry. A step naming an unregistered model fails with
+`ModelNotInRegistry` — there is no silent default substitution.
+Preference lists, adaptive strategies, and constraints below are
+**not yet implemented — planned Phase 5**.
 
 ```yaml
-# Exact model
+# Exact model (the only implemented form)
 model: qwen3:8b
 
-# Preferred list with fallback
+# Preferred list with fallback (Not yet implemented — planned Phase 5)
 model:
   prefer: [qwen3:8b, llama3.1:8b, gpt-4]
   
-# Adaptive selection with constraints
+# Adaptive selection with constraints (Not yet implemented — planned Phase 5)
 model:
   strategy: adaptive          # prescriptive | adaptive | hybrid
   constraints:
@@ -247,7 +260,7 @@ model:
     domain: code               # code | general | reasoning | creative
     complexity: high
 
-# Prescriptive per environment
+# Prescriptive per environment (Not yet implemented — planned Phase 5)
 model:
   strategy: prescriptive
   local: qwen3:8b
@@ -256,24 +269,31 @@ model:
 
 ### Prompt Templates
 
-Templates use Handlebars-style variable interpolation:
+The template engine is **minijinja** (Jinja2 dialect) with **strict
+undefined behavior**: referencing an undefined variable is an error, not an
+empty string. Conditionals use `{% if %}` — Handlebars-style `{{#if}}`
+syntax is invalid and errors.
 
 ```yaml
 # Inline
 template: |
   You are a {{role}}.
   
-  {{#if context}}
+  {% if context %}
   Context:
   {{context}}
-  {{/if}}
+  {% endif %}
   
   User request: {{input}}
 
-# External file
+# External file (relative to the workflow file's directory)
 template_file: prompts/research-assistant.md
+```
 
+```yaml
 # With system/user message separation
+# (Not yet implemented — planned Phase 5/6; today each prompt step sends a
+# single user message under the shared system preamble)
 messages:
   - role: system
     content: "You are a helpful research assistant."
@@ -308,64 +328,50 @@ enum Step {
     Tool(ToolStep),
     #[serde(rename = "transform")]
     Transform(TransformStep),
-    #[serde(rename = "branch")]
-    Branch(BranchStep),
-    #[serde(rename = "parallel")]
-    Parallel(ParallelStep),
-    #[serde(rename = "loop")]
-    Loop(LoopStep),
-    #[serde(rename = "workflow")]
-    SubWorkflow(SubWorkflowStep),
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(untagged)]
-enum ModelSpec {
-    Exact(String),
-    Preferred { prefer: Vec<String> },
-    Adaptive {
-        strategy: RoutingStrategy,
-        constraints: Option<ModelConstraints>,
-        hints: Option<ModelHints>,
-    },
+    // Planned Phase 5/6: Branch, Parallel, Loop, SubWorkflow
 }
 ```
+
+The implemented types live in `crates/mv-core/src/workflow/types.rs`; the
+model is a plain `String` (a `ModelSpec` enum like the one sketched in
+"Model Specification" arrives with Phase 5 routing).
 
 ### Validation
 
-Validate workflows at parse time using Rust's type system:
+Workflows are validated structurally after parsing
+(`crates/mv-core/src/workflow/validate.rs`, surfaced by
+`mv-cli workflow validate`). What it checks today:
 
-```rust
-impl Workflow {
-    fn validate(&self) -> Result<(), Vec<ValidationError>> {
-        let mut errors = Vec::new();
-        
-        // Check all output references point to valid step outputs
-        for output in &self.outputs {
-            if !self.steps.iter().any(|s| s.id() == output.from) {
-                errors.push(ValidationError::MissingStepOutput(output.from.clone()));
-            }
-        }
-        
-        // Check for circular dependencies
-        // Check template variables are resolvable
-        // Check tool names exist in registry
-        
-        if errors.is_empty() { Ok(()) } else { Err(errors) }
-    }
-}
-```
+- Non-empty `steps`; no duplicate step ids; no duplicate output names
+  (a step output shadowing a workflow input is a warning, not an error)
+- Prompt steps have exactly one of `template` / `template_file`
+- Template syntax and references, using minijinja's own parser
+  (`undeclared_variables()`) — so filters (`{{ x | upper }}`) and
+  `{% if %}` blocks validate correctly. Every referenced variable must
+  resolve to a prior step output or a workflow input; self-references are
+  circular-reference errors. `template_file` contents are validated too
+  (when the workflow's directory is known), as are template strings nested
+  inside tool-step input values
+- Transform `operation` is a known transform (`extract_json`)
+- Retry config: `max_attempts >= 1`
+- Workflow `outputs[].from` references an existing step
+
+**Not checked**: tool names. A `tool:` value is only resolved at runtime
+against the merged built-in + MCP tool set — a typo'd tool name passes
+`workflow validate` and fails at execution.
 
 ### Template Engine
 
-Use a lightweight template engine. Options:
+**Chosen: `minijinja`** (strict undefined behavior; the same engine parses
+templates during validation and renders them at execution, so the two can
+never disagree). Options considered:
 
-| Crate | Approach | Recommendation |
-|-------|----------|----------------|
-| `handlebars` | Full Handlebars implementation | ✅ If you need conditionals/loops in templates |
-| `tera` | Jinja2-like templates | Good alternative |
-| `minijinja` | Minimal Jinja2 | ✅ Lightweight, fast |
-| Custom | Simple `{{var}}` replacement | Fine for MVP |
+| Crate | Approach | Outcome |
+|-------|----------|---------|
+| `minijinja` | Minimal Jinja2 | ✅ **Chosen** — lightweight, fast, own parser reusable for validation |
+| `handlebars` | Full Handlebars implementation | Not chosen |
+| `tera` | Jinja2-like templates | Not chosen |
+| Custom | Simple `{{var}}` replacement | Rejected — validation and rendering drift |
 
 ## Comparison to ADO Pipeline YAML
 
@@ -384,7 +390,8 @@ Use a lightweight template engine. Options:
 
 ## Evolution Path
 
-1. **Phase 1 (MVP)**: Sequential steps, exact models, inline templates
+1. **Phase 1 (MVP)**: Sequential steps, exact models, inline templates —
+   **shipped** (sprints 005–008, plus `template_file`, transforms, and retry)
 2. **Phase 2**: Branching, parallel execution, model preferences
 3. **Phase 3**: Adaptive model routing, loop constructs, nested workflows
 4. **Phase 4**: Event triggers, conditional execution, runtime overrides

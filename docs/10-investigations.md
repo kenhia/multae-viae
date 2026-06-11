@@ -49,7 +49,7 @@ When many tools are available (built-in + MCP), smaller models sometimes:
 
 - [ ] Dynamic tool filtering: only present tools relevant to the query
 - [ ] Better system preamble with explicit tool-use instructions
-- [ ] Tool-capability-aware model routing (Phase 7 roadmap item)
+- [ ] Tool-capability-aware model routing (Phase 5 roadmap item)
 - [ ] Retry with reformulated prompt when tool call produces malformed JSON
 
 ## Issue: No Feedback on Turn Limit
@@ -75,7 +75,7 @@ more reliable.
   failure
 - [ ] Cost tracking: log estimated token costs for cloud calls
 - [ ] Hybrid routing: use local for simple queries, cloud for tool-heavy ones
-  (ties into Phase 7 model routing)
+  (ties into Phase 5 model routing)
 
 ## Investigation: Large Step Output in Workflow Pipelines
 

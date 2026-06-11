@@ -9,11 +9,16 @@ you already have the TRT-LLM proxy running at `http://localhost:8003/v1`
 ## 1. Stream a prompt
 
 ```bash
-cargo run -p mv-cli -- -m llama-fp8 --stream "Explain Rust ownership"
+cargo run -p mv-cli -- -m llama-fp8 --stream --no-tools "Explain Rust ownership"
 ```
 
 Tokens appear on stdout as the proxy emits them. The process exits `0`
 on clean termination.
+
+`--no-tools` is required for genuine streaming: tools are attached by
+default and the proxy streams tool calls as plain text, so `--stream`
+without `--no-tools` falls back to buffered output (where tool calling
+works) with a note on stderr (T053).
 
 ## 2. See the actionable error when a model is not loaded
 
@@ -61,14 +66,16 @@ cargo run -p mv-cli -- -m llama-fp8 "list the files in the current directory"
 # → assistant invokes the file_list tool, then answers with real file names
 ```
 
-This also works with `--stream`:
+Combining tools with `--stream` falls back to buffered output (the proxy
+cannot stream executable tool calls — a note is printed to stderr):
 
 ```bash
 cargo run -p mv-cli -- -m llama-fp8 --stream "list the files in the current directory"
+# note: --stream falls back to buffered output because tools are attached ...
 ```
 
-The tool round-trip happens silently between assistant turns; the final
-assistant text streams to stdout.
+The tool round-trip still happens; the final assistant text is printed
+buffered. To stream for real, drop the tools: `--stream --no-tools`.
 
 ## 5. Token usage in telemetry
 

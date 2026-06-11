@@ -31,6 +31,8 @@ This document set covers the following areas:
 | [07 — Model Routing](07-model-routing.md) | Strategies for dynamic model selection and routing |
 | [08 — RAG Integration](08-rag-integration.md) | Retrieval-Augmented Generation patterns and network RAG |
 | [09 — Roadmap](09-roadmap.md) | Phased implementation plan |
+| [10 — Investigations](10-investigations.md) | Open questions on tool-use reliability and agent behavior |
+| [11 — TRT-LLM Integration](11-trt-llm-integration.md) | TensorRT-LLM provider assessment and integration notes |
 
 ## Key Decisions & Recommendations
 
