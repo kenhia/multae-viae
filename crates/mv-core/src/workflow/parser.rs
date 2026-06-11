@@ -267,7 +267,46 @@ steps:
     fn parse_defaults() {
         let wf = load_from_str(VALID_WORKFLOW, "test.yaml").unwrap();
         let defaults = wf.defaults.unwrap();
-        assert_eq!(defaults.model.as_deref(), Some("qwen3:4b"));
+        assert_eq!(
+            defaults.model.map(|s| s.candidates()),
+            Some(vec!["qwen3:4b".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_prompt_model_prefer_list() {
+        let yaml = r#"
+name: prefer-test
+version: "1.0"
+steps:
+  - id: s1
+    type: prompt
+    output: out
+    model:
+      prefer: [local-fast, cloud-fallback]
+    template: "hi"
+  - id: s2
+    type: prompt
+    output: out2
+    model: just-one
+    template: "yo"
+"#;
+        let wf = load_from_str(yaml, "test.yaml").unwrap();
+        match &wf.steps[0] {
+            Step::Prompt(ps) => assert_eq!(
+                ps.model.as_ref().map(|s| s.candidates()),
+                Some(vec!["local-fast".to_string(), "cloud-fallback".to_string()])
+            ),
+            other => panic!("expected Prompt, got {other:?}"),
+        }
+        // A bare string still parses as a single-candidate spec (back-compat).
+        match &wf.steps[1] {
+            Step::Prompt(ps) => assert_eq!(
+                ps.model.as_ref().map(|s| s.candidates()),
+                Some(vec!["just-one".to_string()])
+            ),
+            other => panic!("expected Prompt, got {other:?}"),
+        }
     }
 
     #[test]

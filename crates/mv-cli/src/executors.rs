@@ -1,9 +1,11 @@
 //! Concrete `PromptExecutor`/`ToolExecutor` implementations bridging the
 //! workflow engine (mv-core, rig-free) to rig.
 
+use std::collections::HashSet;
+
 use rig::tool::server::ToolServerHandle;
 
-use crate::providers::{GenParams, complete_with_fallback};
+use crate::providers::{GenParams, complete_chain};
 
 /// Prompt executor that routes workflow prompt steps through the shared
 /// provider dispatch seam.
@@ -16,36 +18,49 @@ impl mv_core::workflow::engine::PromptExecutor for RigPromptExecutor {
     async fn execute_prompt(
         &self,
         prompt_text: &str,
-        model: &str,
+        models: &[String],
         temperature: Option<f64>,
         max_tokens: Option<u64>,
     ) -> Result<String, mv_core::MvError> {
-        // A typo'd model must fail loudly — silently substituting the default
-        // model would run the step elsewhere and report success.
-        let entry =
-            self.registry
-                .get(model)
-                .ok_or_else(|| mv_core::MvError::ModelNotInRegistry {
-                    model: model.to_string(),
-                    available: self.registry.available_ids().join(", "),
-                })?;
+        // Build the candidate chain from the step's preference list: each
+        // preferred id contributes itself followed by its own configured
+        // `fallback` entries, deduped, preserving order. So a bare `model:`
+        // behaves exactly like the CLI path (model + its fallback), and a
+        // `prefer:` list strings several such chains together.
+        let mut chain: Vec<(&mv_core::ModelEntry, String)> = Vec::new();
+        let mut seen: HashSet<&str> = HashSet::new();
+        for id in models {
+            // A typo'd model must fail loudly — silently substituting the
+            // default would run the step elsewhere and report success.
+            let entry =
+                self.registry
+                    .get(id)
+                    .ok_or_else(|| mv_core::MvError::ModelNotInRegistry {
+                        model: id.clone(),
+                        available: self.registry.available_ids().join(", "),
+                    })?;
+            if seen.insert(entry.id.as_str()) {
+                chain.push((entry, entry.endpoint()));
+            }
+            if let Some(fallback_ids) = &entry.fallback {
+                for fid in fallback_ids {
+                    if let Some(fe) = self.registry.get(fid)
+                        && seen.insert(fe.id.as_str())
+                    {
+                        chain.push((fe, fe.endpoint()));
+                    }
+                }
+            }
+        }
 
         let params = GenParams {
             temperature,
             max_tokens,
         };
-        // Workflow prompt steps honor fallback chains too, via the same walker.
         // The engine only needs the text; `model_used` is recorded on the trace.
-        complete_with_fallback(
-            &self.registry,
-            entry,
-            &entry.endpoint(),
-            prompt_text,
-            self.agent_handle.clone(),
-            &params,
-        )
-        .await
-        .map(|outcome| outcome.text)
+        complete_chain(&chain, prompt_text, self.agent_handle.clone(), &params)
+            .await
+            .map(|outcome| outcome.text)
     }
 }
 

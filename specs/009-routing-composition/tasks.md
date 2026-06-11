@@ -159,13 +159,22 @@ through arms.
 
 ## Phase 5: WS5 — Preference lists
 
-- [ ] T019 [WS5] `model:` on prompt steps (and `defaults.model`) accepts bare
+- [X] T019 [WS5] `model:` on prompt steps (and `defaults.model`) accepts bare
   string or `{prefer: [id, …]}` (untagged enum) in workflow types; parse +
-  back-compat tests (FR-010)
-- [ ] T020 [WS5] Validation: `prefer` ids checked against the registry,
+  back-compat tests (FR-010). *`ModelSpec` untagged enum with `candidates()`;
+  the `PromptExecutor::execute_prompt` trait param changed from `model: &str`
+  to `models: &[String]` (the resolved candidate list) — the engine resolves
+  the spec, mocks record the joined list (single id unchanged).*
+- [X] T020 [WS5] Validation: `prefer` ids checked against the registry,
   failure lists available models; resolution builds the candidate chain and
   hands it to the WS1 walker (no second routing path); hermetic test —
-  first-preferred dead → second serves (FR-010)
+  first-preferred dead → second serves (FR-010). *Refactored the WS1 walker
+  into `complete_chain(&[(entry, endpoint)])`; `complete_with_fallback`
+  delegates to it, and `RigPromptExecutor` builds the chain from the prefer
+  list (each id + its own `fallback`, deduped). Registry check is a pre-run
+  pass over `Workflow::model_references()` (recurses branch/parallel arms +
+  `defaults.model`) in mv-core, raising the same `ModelNotInRegistry` the
+  runtime would — mv-core stays registry-free.*
 
 **Checkpoint**: hybrid routing per docs/07 §3, one mechanism.
 

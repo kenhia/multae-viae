@@ -237,6 +237,131 @@ fn dead_ollama_primary_preflight_skips_to_backup() {
         .stderr(predicate::str::contains(BACKUP_ID));
 }
 
+// --- US5 (WS5): step-level `prefer:` list resolves through the chain walker ---
+
+/// Write a two-model config (no `fallback` fields) for prefer-list tests.
+fn write_two_model_config(
+    dir: &std::path::Path,
+    a_id: &str,
+    a_ep: &str,
+    b_id: &str,
+    b_served: &str,
+    b_ep: &str,
+) -> std::path::PathBuf {
+    let path = dir.join("models.yaml");
+    let yaml = format!(
+        "models:\n  \
+           - id: {a_id}\n    provider: trtllm\n    served_name: a-served\n    \
+             endpoint: {a_ep}\n    default: true\n  \
+           - id: {b_id}\n    provider: trtllm\n    served_name: {b_served}\n    \
+             endpoint: {b_ep}\n",
+    );
+    std::fs::write(&path, yaml).expect("write models.yaml");
+    path
+}
+
+#[test]
+fn prefer_list_first_dead_second_serves() {
+    let proxy = FakeProxy::start();
+    proxy.mount_health_ok();
+    proxy.mount_chat_text("Served by the second preference.");
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_two_model_config(
+        dir.path(),
+        "pref-primary",
+        &dead_endpoint(),
+        BACKUP_ID,
+        BACKUP_SERVED,
+        &proxy.endpoint(),
+    );
+
+    let wf_path = dir.path().join("prefer.yaml");
+    std::fs::write(
+        &wf_path,
+        format!(
+            r#"
+name: prefer-e2e
+version: "1.0"
+steps:
+  - id: ask
+    type: prompt
+    output: answer
+    model:
+      prefer: [pref-primary, {BACKUP_ID}]
+    template: "ping"
+outputs:
+  - name: result
+    from: ask
+"#
+        ),
+    )
+    .unwrap();
+
+    cmd()
+        .current_dir(dir.path())
+        .args([
+            "workflow",
+            "run",
+            wf_path.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Served by the second preference."));
+}
+
+#[test]
+fn prefer_list_unknown_id_rejected_before_run() {
+    let proxy = FakeProxy::start();
+    proxy.mount_health_ok();
+    proxy.mount_chat_text("never runs");
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_two_model_config(
+        dir.path(),
+        "pref-primary",
+        &proxy.endpoint(),
+        BACKUP_ID,
+        BACKUP_SERVED,
+        &proxy.endpoint(),
+    );
+
+    let wf_path = dir.path().join("prefer-bad.yaml");
+    std::fs::write(
+        &wf_path,
+        r#"
+name: prefer-bad
+version: "1.0"
+steps:
+  - id: ask
+    type: prompt
+    output: answer
+    model:
+      prefer: [pref-primary, ghost-model]
+    template: "ping"
+"#,
+    )
+    .unwrap();
+
+    cmd()
+        .current_dir(dir.path())
+        .args([
+            "workflow",
+            "run",
+            wf_path.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "Model 'ghost-model' not found in registry",
+        ));
+}
+
 // --- FR-006: --stream keeps single-model semantics — no mid-stream fallback ---
 
 #[test]

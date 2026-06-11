@@ -62,11 +62,6 @@ impl GenParams {
 /// misconfiguration error tries the next entry, anything else (empty prompt,
 /// turn-limit, a completed-but-failed completion) fails fast. If every entry
 /// is exhausted, returns [`MvError::AllModelsFailed`] enumerating each attempt.
-#[tracing::instrument(name = "model_routing", skip_all, fields(
-    router.requested = %primary.id,
-    router.selected = tracing::field::Empty,
-    router.reason = tracing::field::Empty,
-))]
 pub async fn complete_with_fallback(
     registry: &ModelRegistry,
     primary: &ModelEntry,
@@ -75,8 +70,9 @@ pub async fn complete_with_fallback(
     handle: ToolServerHandle,
     params: &GenParams,
 ) -> Result<CompletionOutcome, MvError> {
-    // Resolve the chain up front. Fallback ids are registry-validated at load,
-    // so `get` is expected to hit; a missing entry is skipped defensively.
+    // Resolve the chain up front: the primary (with its possibly-overridden
+    // endpoint) then each fallback id. Fallback ids are registry-validated at
+    // load, so `get` is expected to hit; a missing entry is skipped defensively.
     let mut chain: Vec<(&ModelEntry, String)> = vec![(primary, primary_endpoint.to_string())];
     if let Some(ids) = &primary.fallback {
         for id in ids {
@@ -85,8 +81,27 @@ pub async fn complete_with_fallback(
             }
         }
     }
-    let chain_len = chain.len();
+    complete_chain(&chain, prompt, handle, params).await
+}
 
+/// Walk a pre-built candidate chain, returning the first success. The single
+/// fallback walker behind both [`complete_with_fallback`] (a model + its own
+/// `fallback` list) and step-level `prefer:` lists. Advancement is gated on
+/// [`MvError::is_fallback_eligible`]; a `Dead` preflight skips an entry without
+/// building an agent (multi-entry chains only). If every entry is exhausted,
+/// returns [`MvError::AllModelsFailed`] enumerating each attempt.
+#[tracing::instrument(name = "model_routing", skip_all, fields(
+    router.requested = chain.first().map(|(e, _)| e.id.as_str()).unwrap_or(""),
+    router.selected = tracing::field::Empty,
+    router.reason = tracing::field::Empty,
+))]
+pub async fn complete_chain(
+    chain: &[(&ModelEntry, String)],
+    prompt: &str,
+    handle: ToolServerHandle,
+    params: &GenParams,
+) -> Result<CompletionOutcome, MvError> {
+    let chain_len = chain.len();
     let mut attempts: Vec<(String, String)> = Vec::new();
     for (entry, endpoint) in chain {
         // In a multi-entry chain, skip an entry whose backend preflights `Dead`
@@ -97,13 +112,13 @@ pub async fn complete_with_fallback(
         // For TRT-LLM this overlaps `call_trtllm`'s own preflight; the extra
         // probe on a *healthy* backend is one cheap GET.)
         if chain_len > 1
-            && let PreflightStatus::Dead(e) = preflight(entry, &endpoint, PREFLIGHT_TIMEOUT).await
+            && let PreflightStatus::Dead(e) = preflight(entry, endpoint, PREFLIGHT_TIMEOUT).await
         {
             warn!(model = %entry.id, error = %e, "model preflight reported dead, skipping");
             attempts.push((entry.id.clone(), e.to_string()));
             continue;
         }
-        match complete(entry, &endpoint, prompt, handle.clone(), params).await {
+        match complete(entry, endpoint, prompt, handle.clone(), params).await {
             Ok(text) => {
                 let span = Span::current();
                 span.record("router.selected", entry.id.as_str());

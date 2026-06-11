@@ -19,12 +19,34 @@ pub struct Workflow {
     pub outputs: Vec<WorkflowOutput>,
 }
 
+/// How a prompt step selects its model: a single id, or an ordered preference
+/// list resolved through the fallback chain mechanism (the first reachable
+/// model serves the step).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum ModelSpec {
+    /// A bare model id, e.g. `model: qwen3:8b`.
+    Single(String),
+    /// `model: { prefer: [a, b] }` — try `a`, then `b`, …
+    Prefer { prefer: Vec<String> },
+}
+
+impl ModelSpec {
+    /// The candidate model ids in preference order.
+    pub fn candidates(&self) -> Vec<String> {
+        match self {
+            ModelSpec::Single(id) => vec![id.clone()],
+            ModelSpec::Prefer { prefer } => prefer.clone(),
+        }
+    }
+}
+
 /// Default settings inherited by all steps unless overridden.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowDefaults {
     #[serde(default)]
-    pub model: Option<String>,
+    pub model: Option<ModelSpec>,
     #[serde(default)]
     pub temperature: Option<f64>,
     #[serde(default)]
@@ -117,7 +139,7 @@ pub struct PromptStep {
     pub name: Option<String>,
     pub output: String,
     #[serde(default)]
-    pub model: Option<String>,
+    pub model: Option<ModelSpec>,
     #[serde(default)]
     pub temperature: Option<f64>,
     #[serde(default)]
@@ -234,4 +256,41 @@ pub enum BackoffStrategy {
 pub struct WorkflowOutput {
     pub name: String,
     pub from: String,
+}
+
+impl Workflow {
+    /// Every `(step_id, model_id)` a prompt step or the workflow defaults
+    /// reference, recursing through `branch`/`parallel`. The binary checks
+    /// these against the model registry before running (mv-core stays
+    /// registry-free); `defaults.model` ids are reported under `"defaults"`.
+    pub fn model_references(&self) -> Vec<(String, String)> {
+        let mut refs = Vec::new();
+        if let Some(spec) = self.defaults.as_ref().and_then(|d| d.model.as_ref()) {
+            for id in spec.candidates() {
+                refs.push(("defaults".to_string(), id));
+            }
+        }
+        collect_model_references(&self.steps, &mut refs);
+        refs
+    }
+}
+
+fn collect_model_references(steps: &[Step], refs: &mut Vec<(String, String)>) {
+    for step in steps {
+        match step {
+            Step::Prompt(ps) => {
+                if let Some(spec) = &ps.model {
+                    for id in spec.candidates() {
+                        refs.push((ps.id.clone(), id));
+                    }
+                }
+            }
+            Step::Branch(bs) => {
+                collect_model_references(&bs.then, refs);
+                collect_model_references(&bs.otherwise, refs);
+            }
+            Step::Parallel(par) => collect_model_references(&par.steps, refs),
+            Step::Tool(_) | Step::Transform(_) => {}
+        }
+    }
 }

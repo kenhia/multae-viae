@@ -18,10 +18,13 @@ pub use super::transform::execute_transform;
 /// `futures::future::join_all` on the current task (no `tokio::spawn`, so no
 /// `'static` bound on the executor borrows).
 pub trait PromptExecutor: Send + Sync {
+    /// `models` is the candidate list in preference order (a single id for a
+    /// bare `model:`, or the `prefer:` list). The executor tries them through
+    /// the fallback chain mechanism; the first reachable model serves the step.
     fn execute_prompt(
         &self,
         prompt_text: &str,
-        model: &str,
+        models: &[String],
         temperature: Option<f64>,
         max_tokens: Option<u64>,
     ) -> impl std::future::Future<Output = Result<String, MvError>> + Send;
@@ -98,7 +101,9 @@ pub struct WorkflowResult {
 
 /// Defaults applied to prompt steps that don't override them.
 struct StepDefaults {
-    model: String,
+    /// Default candidate model list (preference order) for steps with no
+    /// explicit `model:`.
+    models: Vec<String>,
     temperature: Option<f64>,
     max_tokens: Option<u64>,
 }
@@ -163,11 +168,12 @@ pub async fn execute_workflow<P: PromptExecutor, T: ToolExecutor>(
     let mut ctx = ExecutionContext::new(resolved_inputs);
 
     let defaults = StepDefaults {
-        model: workflow
+        models: workflow
             .defaults
             .as_ref()
-            .and_then(|d| d.model.clone())
-            .unwrap_or_else(|| default_model.to_string()),
+            .and_then(|d| d.model.as_ref())
+            .map(|spec| spec.candidates())
+            .unwrap_or_else(|| vec![default_model.to_string()]),
         temperature: workflow.defaults.as_ref().and_then(|d| d.temperature),
         max_tokens: workflow.defaults.as_ref().and_then(|d| d.max_tokens),
     };
@@ -243,7 +249,13 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
 ) -> Result<(), MvError> {
     match step {
         Step::Prompt(ps) => {
-            let model = ps.model.as_deref().unwrap_or(&defaults.model);
+            // Resolve the candidate model list: the step's `model:` spec, or
+            // the workflow default candidate list.
+            let models = ps
+                .model
+                .as_ref()
+                .map(|spec| spec.candidates())
+                .unwrap_or_else(|| defaults.models.clone());
             let temp = ps.temperature.or(defaults.temperature);
             let max_tok = ps.max_tokens.or(defaults.max_tokens);
 
@@ -273,7 +285,7 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
             })?;
 
             let output = prompt_executor
-                .execute_prompt(&rendered, model, temp, max_tok)
+                .execute_prompt(&rendered, &models, temp, max_tok)
                 .await
                 .map_err(|e| MvError::WorkflowStepError {
                     step: ps.id.clone(),
@@ -507,14 +519,16 @@ mod tests {
         async fn execute_prompt(
             &self,
             prompt_text: &str,
-            model: &str,
+            models: &[String],
             _temperature: Option<f64>,
             _max_tokens: Option<u64>,
         ) -> Result<String, MvError> {
+            // Record the candidate list as a comma-joined string — a single
+            // model is just its id (back-compat with the pre-prefer tests).
             self.calls
                 .lock()
                 .unwrap()
-                .push((prompt_text.to_string(), model.to_string()));
+                .push((prompt_text.to_string(), models.join(",")));
             let mut responses = self.responses.lock().unwrap();
             if responses.is_empty() {
                 Err(MvError::CompletionFailed {
@@ -1566,7 +1580,7 @@ steps:
         async fn execute_prompt(
             &self,
             prompt_text: &str,
-            _model: &str,
+            _models: &[String],
             _temperature: Option<f64>,
             _max_tokens: Option<u64>,
         ) -> Result<String, MvError> {
