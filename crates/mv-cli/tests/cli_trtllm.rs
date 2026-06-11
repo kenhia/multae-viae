@@ -15,6 +15,21 @@ fn write_models_yaml(content: &str) -> NamedTempFile {
     f
 }
 
+/// Path to the repo-root `models.yaml` (the real registry).
+///
+/// Live, model-loaded `#[ignore]` tests resolve their served model name
+/// through this rather than a fabricated inline config: an inline `llama-fp8`
+/// entry with no `served_name` sends the literal id to the proxy, which serves
+/// `llama-3_1-8b-fp8` and answers 502. Using the real registry means these
+/// tests exercise whatever the operator actually deployed.
+fn repo_models_yaml() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root")
+        .join("models.yaml")
+}
+
 // --- T011: Config parsing with new fields ---
 
 #[test]
@@ -176,8 +191,11 @@ models:
 }
 
 // --- T014 [US2]: live 502 maps to "Run: just load <id>" ---
-// Requires a running TRT-LLM proxy at http://localhost:8003 with NO model
-// loaded so that completion requests return HTTP 502.
+// Requires only a running TRT-LLM proxy at http://localhost:8003. The inline
+// config deliberately omits `served_name`, so the literal id `llama-fp8` is
+// sent to the proxy — a name it never serves — which always answers 502.
+// Keep the fabricated config (do NOT switch to repo_models_yaml(), whose
+// served model is loaded and would answer 200).
 #[test]
 #[ignore = "requires TRT-LLM proxy"]
 fn trtllm_502_emits_just_load_hint() {
@@ -228,14 +246,64 @@ models:
         ));
 }
 
-// --- T018 [US1]: --stream flag visible in help ---
+// --- T018 [US1]: --stream / --no-tools flags visible in help ---
 #[test]
 fn stream_flag_known_to_clap() {
     cmd()
         .args(["prompt", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("--stream"));
+        .stdout(predicate::str::contains("--stream"))
+        .stdout(predicate::str::contains("--no-tools"));
+}
+
+// --- US1: --stream + tools (default) falls back to buffered on TRT-LLM ---
+// Offline: the note fires before any request, so an unreachable endpoint is
+// enough. Tools are attached by default, so the fallback note must appear.
+#[test]
+fn stream_with_tools_emits_buffered_fallback_note() {
+    let yaml = r#"
+models:
+  - id: llama-fp8
+    provider: trtllm
+    endpoint: http://127.0.0.1:19999/v1
+"#;
+    let config = write_models_yaml(yaml);
+    cmd()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "-m",
+            "llama-fp8",
+            "--stream",
+            "hi",
+        ])
+        .assert()
+        .stderr(predicate::str::contains("--stream falls back to buffered"));
+}
+
+// --- US1: --stream --no-tools takes the genuine streaming path (no fallback) ---
+#[test]
+fn stream_no_tools_does_not_emit_fallback_note() {
+    let yaml = r#"
+models:
+  - id: llama-fp8
+    provider: trtllm
+    endpoint: http://127.0.0.1:19999/v1
+"#;
+    let config = write_models_yaml(yaml);
+    cmd()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "-m",
+            "llama-fp8",
+            "--stream",
+            "--no-tools",
+            "hi",
+        ])
+        .assert()
+        .stderr(predicate::str::contains("falls back to buffered").not());
 }
 
 // --- T047 [US1]: --json overrides --stream with warning ---
@@ -268,19 +336,17 @@ models:
 #[test]
 #[ignore = "requires TRT-LLM proxy"]
 fn trtllm_stream_emits_incremental_output() {
-    let yaml = r#"
-models:
-  - id: llama-fp8
-    provider: trtllm
-"#;
-    let config = write_models_yaml(yaml);
+    let config = repo_models_yaml();
+    // `--no-tools` is required for genuine streaming: with tools attached the
+    // TRT-LLM path falls back to buffered (see trtllm_stream_with_tools_*).
     let assert = cmd()
         .args([
             "--config",
-            config.path().to_str().unwrap(),
+            config.to_str().unwrap(),
             "-m",
             "llama-fp8",
             "--stream",
+            "--no-tools",
             "Say hi and then stop.",
         ])
         .assert()
@@ -302,6 +368,10 @@ models:
 }
 
 // --- T020 [US1]: streaming path inherits US2 502 hint ---
+// Like T014, the fabricated `llama-fp8` id is never served, so the proxy
+// returns 502 regardless of load state — keep the inline config. `--no-tools`
+// forces the genuine streaming path so this exercises the streaming preflight
+// (served_model_present) rather than the buffered fallback.
 #[test]
 #[ignore = "requires TRT-LLM proxy"]
 fn trtllm_stream_inherits_just_load_hint_on_502() {
@@ -318,6 +388,7 @@ models:
             "-m",
             "llama-fp8",
             "--stream",
+            "--no-tools",
             "ping",
         ])
         .assert()
@@ -332,17 +403,12 @@ models:
 #[test]
 #[ignore = "requires TRT-LLM proxy"]
 fn trtllm_buffered_records_token_usage_attrs() {
-    let yaml = r#"
-models:
-  - id: llama-fp8
-    provider: trtllm
-"#;
-    let config = write_models_yaml(yaml);
+    let config = repo_models_yaml();
     let assert = cmd()
         .args([
             "-vv",
             "--config",
-            config.path().to_str().unwrap(),
+            config.to_str().unwrap(),
             "-m",
             "llama-fp8",
             "Say hi and then stop.",
@@ -379,14 +445,7 @@ fn trtllm_buffered_tool_call_round_trip() {
     let dir = tempfile::tempdir().unwrap();
     let marker = "mv_marker_abc123.txt";
     std::fs::write(dir.path().join(marker), "hi").unwrap();
-    let yaml = r#"
-models:
-  - id: qwen3-trtllm
-    provider: trtllm
-    served_name: Qwen/Qwen3-8B
-    architecture: qwen
-"#;
-    let config = write_models_yaml(yaml);
+    let config = repo_models_yaml();
     let prompt = format!(
         "Use the file_list tool to list the contents of {}, then tell me the file names you find.",
         dir.path().display()
@@ -394,9 +453,9 @@ models:
     let assert = cmd()
         .args([
             "--config",
-            config.path().to_str().unwrap(),
+            config.to_str().unwrap(),
             "-m",
-            "qwen3-trtllm",
+            "llama-fp8",
             &prompt,
         ])
         .assert()
@@ -408,21 +467,19 @@ models:
     );
 }
 
-// --- T032 [US4]: streaming tool-calling round-trip via TRT-LLM ---
+// --- T032 [US4]: --stream + a tool prompt falls back to buffered ---
+// The TRT-LLM proxy streams tool calls as plain text rather than executable
+// `tool_calls`, so genuine streaming cannot complete a tool round-trip. With
+// tools attached, `--stream` therefore falls back to the buffered path (which
+// does perform the round-trip): the run emits the fallback note on stderr and
+// still surfaces the real file name in stdout.
 #[test]
 #[ignore = "requires TRT-LLM proxy"]
-fn trtllm_streaming_tool_call_round_trip() {
+fn trtllm_stream_with_tools_falls_back_to_buffered_round_trip() {
     let dir = tempfile::tempdir().unwrap();
     let marker = "mv_marker_xyz789.txt";
     std::fs::write(dir.path().join(marker), "hi").unwrap();
-    let yaml = r#"
-models:
-  - id: qwen3-trtllm
-    provider: trtllm
-    served_name: Qwen/Qwen3-8B
-    architecture: qwen
-"#;
-    let config = write_models_yaml(yaml);
+    let config = repo_models_yaml();
     let prompt = format!(
         "Use the file_list tool to list the contents of {}, then tell me the file names you find.",
         dir.path().display()
@@ -430,18 +487,24 @@ models:
     let assert = cmd()
         .args([
             "--config",
-            config.path().to_str().unwrap(),
+            config.to_str().unwrap(),
             "-m",
-            "qwen3-trtllm",
+            "llama-fp8",
             "--stream",
             &prompt,
         ])
         .assert()
         .success();
-    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let output = assert.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        stderr.contains("--stream falls back to buffered"),
+        "expected the buffered-fallback note on stderr, got:\n{stderr}"
+    );
     assert!(
         stdout.contains(marker),
-        "expected streamed final answer to mention {marker}, got:\n{stdout}"
+        "expected the buffered round-trip to mention {marker}, got:\n{stdout}"
     );
 }
 
@@ -452,12 +515,7 @@ models:
 #[test]
 #[ignore = "requires TRT-LLM proxy"]
 fn trtllm_registry_models_terminate_cleanly() {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let repo_root = std::path::Path::new(manifest_dir)
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("workspace root");
-    let registry_path = repo_root.join("models.yaml");
+    let registry_path = repo_models_yaml();
     let registry = mv_core::ModelRegistry::load(&registry_path).expect("load models.yaml");
     let trtllm_ids: Vec<String> = registry
         .available_ids()
@@ -526,26 +584,23 @@ outputs:
 "#;
     std::fs::write(&workflow_path, workflow_yaml).unwrap();
 
-    let models_yaml = r#"
-models:
-  - id: llama-fp8
-    provider: trtllm
-"#;
-    let config = write_models_yaml(models_yaml);
+    let config = repo_models_yaml();
 
     cmd()
         .args([
-            "--config",
-            config.path().to_str().unwrap(),
             "workflow",
             "run",
             workflow_path.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
         ])
         .assert()
         .success();
 }
 
 // --- T039 [US6]: workflow surfaces ModelNotLoaded hint on 502 ---
+// As in T014, the inline `llama-fp8` model has no `served_name`, so the proxy
+// never serves it and returns 502 — the workflow path must surface the hint.
 #[test]
 #[ignore = "requires TRT-LLM proxy"]
 fn workflow_with_unloaded_trtllm_model_emits_just_load_hint() {
@@ -577,11 +632,11 @@ models:
 
     cmd()
         .args([
-            "--config",
-            config.path().to_str().unwrap(),
             "workflow",
             "run",
             workflow_path.to_str().unwrap(),
+            "--config",
+            config.path().to_str().unwrap(),
         ])
         .assert()
         .failure()

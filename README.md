@@ -83,12 +83,17 @@ mv-cli "What is Rust?"                    # Direct prompt
 mv-cli prompt "What is Rust?"             # Explicit subcommand
 mv-cli -m qwen3:8b "Explain async"        # Specify model
 mv-cli --json "Hello"                     # JSON output
-mv-cli -m llama-fp8 --stream "Explain Rust ownership"   # Stream tokens (TRT-LLM only)
+mv-cli -m llama-fp8 --stream --no-tools "Explain Rust ownership"  # Stream tokens (TRT-LLM only)
 ```
 
 > `--stream` is only supported for `provider: trtllm` models. Using
 > `--json --stream` together emits a warning and falls back to buffered
 > JSON output.
+>
+> Tools are attached by default, and the TRT-LLM proxy can't stream tool
+> calls — so `--stream` alone falls back to buffered output (where tool
+> calling works) with a note on stderr. Add `--no-tools` to stream tokens
+> with no tools attached, as in the example above.
 
 #### Workflows
 

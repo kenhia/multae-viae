@@ -29,6 +29,8 @@ ci:
     cargo clippy --all-targets --all-features -- -D warnings
     cargo test --workspace
 
-# Live TRT-LLM tests (require proxy on http://localhost:8003 with a model loaded)
+# Live TRT-LLM tests (require proxy on http://localhost:8003 with a model loaded).
+# Forced single-threaded: the tests share one GPU-backed proxy, so concurrent
+# heavy generations contend and time out. Run serially for stable results.
 test-trtllm:
-    cargo test -p mv-cli -- --ignored
+    cargo test -p mv-cli -- --ignored --test-threads=1

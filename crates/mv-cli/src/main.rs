@@ -67,8 +67,20 @@ struct PromptArgs {
     mcp_config: Option<String>,
 
     /// Stream tokens to stdout as they arrive (TRT-LLM models only).
+    ///
+    /// Built-in and MCP tools are attached by default, and the TRT-LLM proxy
+    /// streams tool calls as plain text rather than executable calls — so with
+    /// tools attached, `--stream` falls back to buffered output (where tool
+    /// calling works). Combine with `--no-tools` to stream without tools.
     #[arg(long)]
     stream: bool,
+
+    /// Disable all tools (built-in and MCP) for this request.
+    ///
+    /// Required to actually stream from TRT-LLM: `--stream --no-tools` streams
+    /// tokens with no tool access.
+    #[arg(long)]
+    no_tools: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -152,18 +164,40 @@ async fn run_prompt(
         return Err(mv_core::MvError::StreamingNotSupported);
     }
 
-    // Set up agent ToolServer with built-in tools
-    let tool_server = ToolServer::new()
-        .tool(mv_core::tools::file_list::FileList)
-        .tool(mv_core::tools::file_read::FileRead)
-        .tool(mv_core::tools::shell_exec::ShellExec)
-        .tool(mv_core::tools::http_get::HttpGet);
+    // The TRT-LLM proxy streams tool calls as plain text rather than as
+    // executable `tool_calls`, so streaming with tools attached produces fake,
+    // never-executed tool-call text. Prefer correctness: when tools are
+    // attached, fall back to buffered (which performs the real tool round-trip).
+    // `--no-tools` opts out and enables genuine streaming.
+    let stream_trtllm_path = effective_stream && entry.provider == "trtllm" && args.no_tools;
+    if effective_stream && entry.provider == "trtllm" && !args.no_tools {
+        eprintln!(
+            "note: --stream falls back to buffered output because tools are attached \
+             (the TRT-LLM proxy cannot stream tool calls); re-run with --no-tools to stream"
+        );
+    }
+
+    // Set up agent ToolServer. `--no-tools` attaches nothing (built-in or MCP),
+    // which is what makes clean TRT-LLM streaming possible.
+    let mut tool_server = ToolServer::new();
+    if !args.no_tools {
+        tool_server = tool_server
+            .tool(mv_core::tools::file_list::FileList)
+            .tool(mv_core::tools::file_read::FileRead)
+            .tool(mv_core::tools::shell_exec::ShellExec)
+            .tool(mv_core::tools::http_get::HttpGet);
+    }
     let agent_handle = tool_server.run();
 
-    // Connect MCP servers to a separate handle, then register cleaned tools on the agent handle
-    let mcp_connections = connect_mcp_servers(args.mcp_config.as_deref(), &agent_handle).await?;
+    // Connect MCP servers to a separate handle, then register cleaned tools on
+    // the agent handle (skipped entirely under --no-tools).
+    let mcp_connections = if args.no_tools {
+        Vec::new()
+    } else {
+        connect_mcp_servers(args.mcp_config.as_deref(), &agent_handle).await?
+    };
 
-    let result = if effective_stream && entry.provider == "trtllm" {
+    let result = if stream_trtllm_path {
         stream_trtllm(entry, &endpoint, prompt, agent_handle).await
     } else {
         match entry.provider.as_str() {
@@ -425,6 +459,18 @@ async fn stream_trtllm(
     let model_name = entry.model_name();
     info!(model = %model_name, endpoint = %endpoint, locality = "local", "streaming from TRT-LLM");
 
+    // Preflight the served-model list. rig's streaming layer swallows a proxy
+    // 502 (logs an SSE parse error, ends the turn empty), so an unloaded model
+    // would otherwise yield silent empty output and exit 0. Only treat a
+    // definitive "not served" as an error; an indeterminate preflight (None)
+    // falls through to the stream attempt.
+    if mv_core::trtllm::health::served_model_present(endpoint, model_name).await == Some(false) {
+        return Err(mv_core::MvError::ModelNotLoaded {
+            model: entry.id.clone(),
+            hint: format!("Run: just load {}", entry.id),
+        });
+    }
+
     let client = rig::providers::openai::CompletionsClient::builder()
         .api_key("tensorrt_llm")
         .base_url(endpoint)
@@ -519,9 +565,19 @@ fn classify_rig_error(
     hint: &str,
     trtllm_load_id: Option<&str>,
 ) -> mv_core::MvError {
-    if msg.contains("not found") || (msg.contains("model") && msg.contains("pull")) {
-        mv_core::MvError::ModelNotFound {
-            model: model.to_string(),
+    // Order matters. The TRT-LLM 502 → not-loaded mapping is checked FIRST:
+    // rig surfaces a live-proxy 502 as a string that also contains "HttpError"
+    // (the BackendUnreachable branch) and Triton's "...is not found" (the
+    // ModelNotFound branch), so either would otherwise shadow it and swallow
+    // US2's `just load` hint. This is safe for the connection-refused case
+    // (US2 scenario 3): a genuine refusal carries no "502", so it falls
+    // through to BackendUnreachable below.
+    if let Some(id) = trtllm_load_id
+        && msg.contains("502")
+    {
+        mv_core::MvError::ModelNotLoaded {
+            model: id.to_string(),
+            hint: format!("Run: just load {id}"),
         }
     } else if msg.contains("connection")
         || msg.contains("Connection")
@@ -534,12 +590,9 @@ fn classify_rig_error(
             endpoint: endpoint.to_string(),
             hint: hint.to_string(),
         }
-    } else if let Some(id) = trtllm_load_id
-        && msg.contains("502")
-    {
-        mv_core::MvError::ModelNotLoaded {
-            model: id.to_string(),
-            hint: format!("Run: just load {id}"),
+    } else if msg.contains("not found") || (msg.contains("model") && msg.contains("pull")) {
+        mv_core::MvError::ModelNotFound {
+            model: model.to_string(),
         }
     } else {
         mv_core::MvError::CompletionFailed {
@@ -577,8 +630,14 @@ fn init_tracing(verbose: u8, otlp_endpoint: Option<&str>) {
         }
     };
 
+    // Only colourise when stderr is a real terminal. Piped/redirected logs
+    // (e.g. captured by tests or written to a file) then stay plain text —
+    // ANSI escapes between a field name and its `=` otherwise corrupt both
+    // log files and substring matches over the output.
+    use std::io::IsTerminal as _;
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
         .with_span_events(if verbose >= 2 {
             tracing_subscriber::fmt::format::FmtSpan::CLOSE
         } else {
@@ -891,6 +950,32 @@ mod tests {
     fn classify_rig_error_502_maps_to_model_not_loaded() {
         let err = classify_rig_error(
             "HTTP error: status code: 502 Bad Gateway",
+            "llama-fp8",
+            "http://localhost:8003/v1",
+            "Start the server with: trtllm-serve <model-path>",
+            Some("llama-fp8"),
+        );
+        match err {
+            mv_core::MvError::ModelNotLoaded { model, hint } => {
+                assert_eq!(model, "llama-fp8");
+                assert_eq!(hint, "Run: just load llama-fp8");
+            }
+            other => panic!("expected ModelNotLoaded, got: {other:?}"),
+        }
+    }
+
+    // Regression: this is the verbatim error rig surfaces from the live proxy
+    // on a 502. It contains "HttpError" (matches the BackendUnreachable branch)
+    // AND "...is not found" (matches the ModelNotFound branch) AND "502". The
+    // TRT-LLM 502 → ModelNotLoaded mapping must win over both, or US2's
+    // `just load` hint never fires against the real proxy.
+    #[test]
+    fn classify_rig_error_502_with_not_found_body_maps_to_model_not_loaded() {
+        let err = classify_rig_error(
+            "CompletionError: HttpError: Invalid status code 502 Bad Gateway \
+             with message: {\"detail\":\"Triton returned HTTP 404: \
+             {\\\"error\\\":\\\"Request for unknown model: 'ensemble_llama-fp8' \
+             is not found\\\"}\"}",
             "llama-fp8",
             "http://localhost:8003/v1",
             "Start the server with: trtllm-serve <model-path>",

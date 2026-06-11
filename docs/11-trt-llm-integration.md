@@ -257,16 +257,50 @@ Passing `--json --stream` together emits a warning to stderr and falls
 back to buffered JSON output (`--json` wins).
 
 ```bash
-mv-cli -m llama-fp8 --stream "Explain Rust ownership"
+mv-cli -m llama-fp8 --stream --no-tools "Explain Rust ownership"
 ```
+
+### Streaming and tools: `--no-tools`
+
+The TRT-LLM proxy streams a tool call as plain-text `content`
+(`{"name": "file_list", ...}`) rather than as an executable `tool_calls`
+delta, so no OpenAI client (rig included) can run a tool mid-stream — the
+model just emits never-executed tool-call text and loops. Built-in and MCP
+tools are attached to every request by default, so:
+
+- **`--stream` (default, tools attached)** → falls back to the **buffered**
+  path, which performs the real tool round-trip. A note is printed to
+  stderr: `note: --stream falls back to buffered output because tools are
+  attached ...`.
+- **`--stream --no-tools`** → genuine token streaming with no tools
+  attached (built-in *or* MCP). This is the form to use for streaming
+  demos and for prompts that don't need tools.
+
+`--no-tools` is a general `prompt` flag (it works for any provider); on
+TRT-LLM it is what unlocks real streaming.
 
 ### `Run: just load <id>` hint on 502
 
-When the TRT-LLM proxy reachable but returns HTTP 502 (typically because
+When the TRT-LLM proxy is reachable but returns HTTP 502 (typically because
 no model is loaded), the CLI maps the rig error to
 `MvError::ModelNotLoaded` whose Display includes
-`Run: just load <model-id>` as an actionable hint. The same classifier
-runs in buffered, streaming, and workflow paths.
+`Run: just load <model-id>` as an actionable hint.
+
+Two hardening fixes make this reliable against the real proxy:
+
+- **502 classifier ordering.** The proxy's 502 body wraps a Triton
+  `"...is not found"` string and rig surfaces it as an `HttpError`, both of
+  which previously shadowed the 502 mapping (the hint never fired). The
+  classifier now evaluates the TRT-LLM 502 branch first; a genuine
+  connection refusal carries no `502` and still maps to
+  `BackendUnreachable`.
+- **Streaming preflight.** rig's streaming layer swallows a 502 (it logs an
+  SSE parse error and ends the turn empty), so the streaming path queries
+  `/v1/models` first (`trtllm::health::served_model_present`) and surfaces
+  the same `just load` hint for an unloaded model instead of silent empty
+  output.
+
+The buffered, streaming, and workflow paths all share the one classifier.
 
 ### Token-usage telemetry attributes
 
@@ -274,7 +308,10 @@ Both the buffered and streaming TRT-LLM paths now record OTel
 `gen_ai.usage.input_tokens` and `gen_ai.usage.output_tokens` span
 attributes whenever the proxy supplies non-zero counts. The attributes
 are also visible in stderr fmt output at `-vv` (which enables
-`FmtSpan::CLOSE`).
+`FmtSpan::CLOSE`). The fmt layer emits ANSI colour only when stderr is a
+real terminal, so redirected/piped logs stay plain text (ANSI escapes
+between a field name and its `=` previously corrupted log files and
+broke substring tooling).
 
 ### Stop-sequence configuration
 

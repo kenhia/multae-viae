@@ -418,14 +418,73 @@ parity with sprint 004 behavior preserved.
   new offline tests added in Phases 2–8.
 - [X] T048 Run `just ci` three consecutive times back-to-back and confirm
   zero flakes — required by SC-007.
-- [ ] T045 Run `just test-trtllm` (T002) against a healthy proxy with
+- [X] T045 Run `just test-trtllm` (T002) against a healthy proxy with
   `llama-fp8` loaded, then again with no model loaded, to confirm both
   the success path (US1, US3, US4, US5, US6) and the 502 path (US2,
-  US6) report correctly.
-- [ ] T046 Run the deliverable command exactly as quoted in the spec
-  (`cargo run -p mv-cli -- -m llama-fp8 --stream "Explain Rust ownership"`)
-  and visually confirm SC-001 (first token visible within 1 s, subsequent
-  chunks streaming).
+  US6) report correctly. **Done 2026-06-11**: all 9 live tests green
+  against `llama-3_1-8b-fp8`. Required the fixture/product fixes recorded
+  in Phase 10 below; the suite now runs `--test-threads=1`.
+- [X] T046 Run the deliverable command and visually confirm SC-001 (first
+  token visible within 1 s, subsequent chunks streaming). **Done
+  2026-06-11**: the deliverable is now
+  `cargo run -p mv-cli -- -m llama-fp8 --stream --no-tools "Explain Rust
+  ownership"` — `--no-tools` is required because the default `--stream`
+  falls back to buffered when tools are attached (see Phase 10, T053).
+
+---
+
+## Phase 10: Live-Validation Findings & Fixes (added 2026-06-11)
+
+**Context**: First live run of `just test-trtllm` against the real
+TRT-LLM proxy (`llama-3_1-8b-fp8` on `:8003`) passed only 1/9 ignored
+tests. Root-causing the failures surfaced two genuine product bugs (US2
+hardening was silently broken against the real proxy), several test-fixture
+bugs, and one proxy capability gap. All fixes below; offline `just ci`
+stays green (now 148 tests) and the live suite is 9/9.
+
+### Product bugs
+
+- [X] T049 502 classifier shadowing (`crates/mv-cli/src/main.rs`
+  `classify_rig_error`): the proxy's 502 body wraps Triton's
+  `"...is not found"` and rig surfaces it as `HttpError`, both of which
+  shadowed the `502 → ModelNotLoaded` branch — US2's `just load` hint never
+  fired against the real proxy. Reordered so the TRT-LLM 502 branch is
+  evaluated first (safe for the connection-refused case, which carries no
+  `502`). Regression test uses the verbatim proxy error string.
+- [X] T050 Streaming 502 swallowed: rig's streaming layer logs the SSE
+  parse error and ends the turn empty (exit 0), so the buffered 502 mapping
+  could not fire on the streaming path. Added a `/v1/models` preflight
+  (`mv_core::trtllm::health::served_model_present`) that surfaces the same
+  `ModelNotLoaded` hint for an unloaded model; `None` (indeterminate) falls
+  through to the stream attempt. Unit tests for `model_in_list` / `models_url`.
+- [X] T051 ANSI in piped logs (`init_tracing`): the fmt layer emitted ANSI
+  colour even when stderr was not a TTY, corrupting redirected logs and
+  hiding `gen_ai.usage.*` from substring matches (the real cause of the
+  US3 telemetry test failure — the attributes were always recorded). Now
+  `.with_ansi(stderr().is_terminal())`.
+
+### Test-fixture fixes
+
+- [X] T052 Live tests targeted a model the proxy doesn't serve. Loaded-path
+  tests now resolve `served_name` through the real repo `models.yaml`
+  (`repo_models_yaml()` helper); tool tests use `llama-fp8` instead of an
+  undeployed `Qwen/Qwen3-8B`; workflow tests pass `--config` *after*
+  `workflow run` (it is a subcommand arg, not global); `just test-trtllm`
+  now runs `--test-threads=1` (the single-GPU proxy can't serve concurrent
+  generations).
+
+### Proxy capability gap → design change
+
+- [X] T053 Streaming + tool-calling is unsupported by the TRT-LLM proxy: it
+  streams a tool call as plain-text `content`, never as a `tool_calls`
+  delta, so the tool is never executed. Added a `--no-tools` flag; on
+  TRT-LLM, `--stream` with tools attached now falls back to the buffered
+  path (which does the real tool round-trip) with a stderr note, while
+  `--stream --no-tools` performs genuine streaming. Documented in
+  `docs/11-trt-llm-integration.md` and `README.md`. The former
+  `trtllm_streaming_tool_call_round_trip` test is replaced by
+  `trtllm_stream_with_tools_falls_back_to_buffered_round_trip`; the live
+  streaming tests now pass `--no-tools`.
 
 ---
 
