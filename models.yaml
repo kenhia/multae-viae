@@ -1,5 +1,7 @@
 # Model registry for multae-viae
-# See specs/002-multi-model-telemetry/data-model.md for schema documentation.
+# See specs/007-trtllm-hardening/data-model.md for schema documentation
+# (served_name, architecture, quant, expected_vram_gb, stop_sequences).
+# Each entry also accepts an optional max_turns (agentic turn cap, default 10).
 
 models:
   - id: qwen3:4b

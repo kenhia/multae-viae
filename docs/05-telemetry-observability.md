@@ -85,11 +85,13 @@ use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-fn init_telemetry() -> anyhow::Result<()> {
-    // OTLP exporter for traces
+fn init_telemetry() -> Result<(), Box<dyn std::error::Error>> {
+    // OTLP/HTTP exporter for traces. mv-cli's `--otlp [URL]` defaults to
+    // http://localhost:4318 and appends /v1/traces automatically
+    // (see crates/mv-cli/src/telemetry.rs).
     let otlp_exporter = opentelemetry_otlp::SpanExporter::builder()
-        .with_tonic()
-        .with_endpoint("http://localhost:4317")
+        .with_http()
+        .with_endpoint("http://localhost:4318/v1/traces")
         .build()?;
 
     let tracer_provider = SdkTracerProvider::builder()
@@ -121,17 +123,21 @@ fn init_telemetry() -> anyhow::Result<()> {
 
 ### Workflow Execution
 
+The engine emits a `workflow_execute` span per run, with a `workflow_step`
+child span per step (see `crates/mv-core/src/workflow/engine.rs`). The CLI
+wraps each prompt request in an `mv_cli_request` span.
+
 ```rust
 #[tracing::instrument(
-    name = "workflow.execute",
+    name = "workflow_execute",
     fields(
         workflow.name = %workflow.name,
-        workflow.id = %workflow.id,
-        workflow.steps = workflow.steps.len(),
+        workflow.version = %workflow.version,
+        workflow.step_count = workflow.steps.len(),
     )
 )]
 async fn execute_workflow(&self, workflow: &Workflow) -> Result<Output> {
-    // Each step gets its own child span
+    // Each step gets its own "workflow_step" child span
     for step in &workflow.steps {
         self.execute_step(step).await?;
     }
@@ -153,9 +159,12 @@ attributes to capture:
 | `gen_ai.request.temperature` | `0.7` | Temperature setting |
 | `gen_ai.response.finish_reason` | `stop` | Why generation stopped |
 
+Model-call spans are named `llm_completion` (one per provider call site in
+`crates/mv-cli/src/providers.rs`), carrying GenAI attributes:
+
 ```rust
 #[tracing::instrument(
-    name = "gen_ai.completion",
+    name = "llm_completion",
     fields(
         gen_ai.system = %provider,
         gen_ai.request.model = %model,
@@ -177,29 +186,23 @@ async fn call_model(&self, provider: &str, model: &str, prompt: &str) -> Result<
 
 ### Tool Invocations
 
+Tool spans are function-named: each built-in tool's `#[tracing::instrument]`
+span carries the tool function's name (`file_list`, `file_read`,
+`shell_exec`, `http_get`), and workflow tool steps add an `execute_tool`
+span with a `tool.name` attribute (`crates/mv-cli/src/executors.rs`):
+
 ```rust
-#[tracing::instrument(
-    name = "tool.call",
-    fields(
-        tool.name = %name,
-        tool.source,          // "mcp", "built-in", "custom"
-        tool.duration_ms,
-        tool.success,
-    )
-)]
-async fn call_tool(&self, name: &str, args: Value) -> Result<ToolResult> {
-    let start = Instant::now();
-    let result = self.registry.execute(name, args).await;
-
-    let span = tracing::Span::current();
-    span.record("tool.duration_ms", start.elapsed().as_millis() as u64);
-    span.record("tool.success", result.is_ok());
-
-    result
+#[tracing::instrument(level = "info", skip(self, inputs), fields(tool.name = %tool_name))]
+async fn execute_tool(
+    &self,
+    tool_name: &str,
+    inputs: &HashMap<String, serde_json::Value>,
+) -> Result<String, MvError> {
+    // ... call into the shared ToolServer (built-in + MCP tool set)
 }
 ```
 
-### Model Routing Decisions
+### Model Routing Decisions *(future — Phase 5)*
 
 ```rust
 #[tracing::instrument(
@@ -269,8 +272,9 @@ docker run -d --name jaeger \
   jaegertracing/jaeger:latest
 ```
 
-Then point the controller's OTLP exporter at `http://localhost:4317` and
-view traces at `http://localhost:16686`.
+Then run `mv-cli --otlp` (OTLP/HTTP, default `http://localhost:4318` —
+`/v1/traces` is appended automatically) and view traces at
+`http://localhost:16686`.
 
 ## Observability Tools Worth Exploring
 

@@ -19,7 +19,6 @@ steps:
     tool: file_list
     inputs:
       path: "{{directory}}"
-    on_error: skip
 
   - id: summarize
     name: Summarize Structure

@@ -138,10 +138,18 @@ mod tests {
         );
     }
 
+    /// An endpoint on a port that was just freed: connecting to it is
+    /// refused instantly (no fixed-port collision, no timeout wait).
+    fn unreachable_endpoint() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        format!("http://127.0.0.1:{port}/v1")
+    }
+
     #[tokio::test]
     async fn check_health_unreachable() {
-        // Connect to a port that should not be listening
-        let result = check_health("http://127.0.0.1:19999/v1").await;
+        let result = check_health(&unreachable_endpoint()).await;
         assert!(matches!(result, HealthCheckResult::Unreachable { .. }));
     }
 
@@ -185,7 +193,7 @@ mod tests {
     async fn served_model_present_unreachable_returns_none() {
         // Nothing listening → cannot determine; caller proceeds.
         assert_eq!(
-            served_model_present("http://127.0.0.1:19999/v1", "llama-fp8").await,
+            served_model_present(&unreachable_endpoint(), "llama-fp8").await,
             None
         );
     }

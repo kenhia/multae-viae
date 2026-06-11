@@ -35,10 +35,9 @@ See the [docs/](docs/) directory for in-depth research and architecture design:
 |-------|-----------|
 | Language | Rust |
 | Agent Framework | [Rig](https://github.com/0xPlaygrounds/rig) (`rig-core`) |
-| Local Inference | [Ollama](https://ollama.com/) + [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM) (`trtllm-serve`) + [mistral.rs](https://github.com/EricLBuehler/mistral.rs) |
+| Local Inference | [Ollama](https://ollama.com/) + [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM) (`trtllm-serve`); [mistral.rs](https://github.com/EricLBuehler/mistral.rs) planned |
 | MCP | [RMCP](https://github.com/modelcontextprotocol/rust-sdk) |
 | Telemetry | [OpenTelemetry](https://github.com/open-telemetry/opentelemetry-rust) + `tracing` |
-| ML Framework | [Candle](https://github.com/huggingface/candle) (HuggingFace) |
 
 ## Quick Start
 
@@ -46,7 +45,7 @@ See the [docs/](docs/) directory for in-depth research and architecture design:
 
 - **Rust** (stable, edition 2024): `rustup update stable`
 - **Ollama** running locally: `ollama serve`
-- **Model pulled**: `ollama pull qwen3:4b`
+- **Model pulled**: `ollama pull qwen3:8b` (the default in the shipped `models.yaml`)
 - **just** task runner: `cargo install just`
 
 ### Build & Run
@@ -68,12 +67,20 @@ Commands:
   prompt     Send a prompt to a model (default when no subcommand)
   workflow   Manage and execute workflows
 
-Options:
+Options (global):
   -v, --verbose    Increase log verbosity (repeat for more: -vv)
       --otlp [URL] Enable OTLP trace export [default: http://localhost:4318]
   -j, --json       Output response as JSON object
   -h, --help       Print help
   -V, --version    Print version
+
+Options (prompt):
+  -m, --model <MODEL>        Model name (must exist in config or built-in registry)
+  -e, --endpoint <ENDPOINT>  Backend endpoint override (any provider)
+  -c, --config <CONFIG>      Path to models.yaml config file
+      --mcp-config <PATH>    Path to MCP servers YAML config [default: mcp-servers.yaml]
+      --stream               Stream tokens to stdout as they arrive (TRT-LLM models only)
+      --no-tools             Disable all tools (built-in and MCP) for this request
 ```
 
 #### Prompt (default command)
@@ -86,14 +93,19 @@ mv-cli --json "Hello"                     # JSON output
 mv-cli -m llama-fp8 --stream --no-tools "Explain Rust ownership"  # Stream tokens (TRT-LLM only)
 ```
 
-> `--stream` is only supported for `provider: trtllm` models. Using
-> `--json --stream` together emits a warning and falls back to buffered
-> JSON output.
->
-> Tools are attached by default, and the TRT-LLM proxy can't stream tool
-> calls — so `--stream` alone falls back to buffered output (where tool
-> calling works) with a note on stderr. Add `--no-tools` to stream tokens
-> with no tools attached, as in the example above.
+**Flag interactions** (`--stream` × `--json` × `--no-tools` × provider):
+
+| Flags | Provider | Behavior |
+|-------|----------|----------|
+| `--stream` | ollama / openai | Error: `streaming is only supported for TRT-LLM models in this release` |
+| `--stream --json` | any | Warning on stderr (`--json overrides --stream`), buffered JSON output |
+| `--stream` | trtllm | Note on stderr, falls back to buffered output — tools are attached by default and the TRT-LLM proxy streams tool calls as plain text, so buffered mode (where tool calling works) is used |
+| `--stream --no-tools` | trtllm | Streams tokens to stdout as they arrive |
+| `--no-tools` (alone) | any | Buffered completion with no tools attached (built-in or MCP) |
+
+> The `just load <id>` hint in TRT-LLM "model not loaded" errors refers to
+> the **trt-llm-explore** repo's justfile (which manages the proxy), not
+> this repo's.
 
 #### Workflows
 
@@ -135,10 +147,12 @@ outputs:
     from: summarize
 ```
 
-Workflows support three step types: `prompt` (LLM calls), `tool` (built-in or
-MCP tool invocations with skip/fail/retry error handling), and `transform`
-(data extraction like `extract_json`). Template variables use `{{var}}` syntax
-with step outputs shadowing workflow inputs.
+Workflows support three step types: `prompt` (LLM calls), `tool`, and
+`transform`. Tool steps execute real tools — the same merged built-in + MCP
+tool set the agent sees — with skip/fail/retry error handling (retry
+re-attempts transient errors only, and re-runs side effects). `transform`
+currently supports a single operation, `extract_json`. Template variables use
+`{{var}}` syntax (minijinja) with step outputs shadowing workflow inputs.
 
 ### Model Configuration
 

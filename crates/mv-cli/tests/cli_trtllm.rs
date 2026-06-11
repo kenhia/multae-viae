@@ -108,7 +108,7 @@ models:
 // --- T011: unsupported provider still errors ---
 
 #[test]
-fn unsupported_provider_still_errors() {
+fn unknown_provider_rejected_at_config_load() {
     let yaml = r#"
 models:
   - id: test-model
@@ -124,9 +124,12 @@ models:
             "Hello",
         ])
         .assert();
+    // 008/T012: rejected when the registry loads — before any call — with
+    // the valid provider list in the message.
     assert
         .failure()
-        .stderr(predicate::str::contains("unsupported provider"));
+        .stderr(predicate::str::contains("unknown_provider"))
+        .stderr(predicate::str::contains("trtllm"));
 }
 
 // --- T018: Telemetry span attributes (structural test) ---
@@ -523,7 +526,7 @@ fn trtllm_registry_models_terminate_cleanly() {
         .filter_map(|id| {
             registry
                 .get(id)
-                .filter(|e| e.provider == "trtllm")
+                .filter(|e| e.provider == mv_core::Provider::Trtllm)
                 .map(|e| e.id.clone())
         })
         .collect();

@@ -10,6 +10,9 @@ use super::truncate_output;
     params(path = "Directory path to list; use '.' for current directory")
 )]
 pub fn file_list(path: String) -> Result<String, ToolError> {
+    super::tool_policy()
+        .check_path(&path)
+        .map_err(|e| ToolError::ToolCallError(e.into()))?;
     let dir = if path.is_empty() { "." } else { &path };
 
     let entries =

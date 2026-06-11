@@ -406,7 +406,7 @@ parity with sprint 004 behavior preserved.
 - [X] T041 [P] Update `docs/11-trt-llm-integration.md` with a "Sprint 007:
   Streaming & Hardening" subsection summarising the `--stream` flag, the
   `just load` hint, telemetry attributes, and stop-sequence configuration.
-- [ ] T042 [P] Update `docs/09-roadmap.md` to mark Phase 4.5.1 tasks
+- [X] T042 [P] Update `docs/09-roadmap.md` to mark Phase 4.5.1 tasks
   complete (checkbox flip on the 7 task bullets) **only after** merge —
   this is the post-merge cleanup task tracked alongside the sprint-ship
   workflow.

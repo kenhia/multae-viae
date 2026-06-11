@@ -207,7 +207,7 @@ servers:
   - name: filesystem
     transport: stdio
     command: npx
-    args: ["-y", "@anthropic/mcp-filesystem"]
+    args: ["-y", "@modelcontextprotocol/server-filesystem"]
     env:
       ALLOWED_DIRS: "/tmp:/home/user/docs"
 

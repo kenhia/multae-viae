@@ -57,6 +57,9 @@ impl ToolDyn for CleanedMcpTool {
             self.mcp_handle
                 .call_tool(&self.tool_name, &args)
                 .await
+                // MCP tools honor the same output cap as built-ins — one
+                // verbose MCP tool must not blow the model context.
+                .map(|out| crate::tools::truncate_output(&out, crate::tools::MAX_TOOL_OUTPUT_CHARS))
                 .map_err(|e| ToolError::ToolCallError(e.to_string().into()))
         })
     }
@@ -183,5 +186,35 @@ mod tests {
 
         let count = register_mcp_tools(&mcp_handle, &agent_handle).await;
         assert_eq!(count, 0);
+    }
+
+    // Stand-in for a verbose MCP tool: emits more than MAX_TOOL_OUTPUT_CHARS.
+    #[rig::tool_macro(
+        description = "emit oversized output",
+        params(path = "ignored"),
+        required(path)
+    )]
+    async fn big_output(path: String) -> Result<String, ToolError> {
+        let _ = path;
+        Ok("x".repeat(crate::tools::MAX_TOOL_OUTPUT_CHARS + 2000))
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_output_is_truncated() {
+        let mcp_handle = ToolServer::new().tool(BigOutput).run();
+        let agent_handle = ToolServer::new().run();
+
+        let count = register_mcp_tools(&mcp_handle, &agent_handle).await;
+        assert_eq!(count, 1);
+
+        let result = agent_handle
+            .call_tool("big_output", r#"{"path":"x"}"#)
+            .await
+            .expect("cleaned MCP tool call should succeed");
+        assert!(
+            result.contains("[truncated at 10000 chars]"),
+            "MCP output must honor the built-in truncation cap"
+        );
+        assert!(result.len() < crate::tools::MAX_TOOL_OUTPUT_CHARS + 100);
     }
 }

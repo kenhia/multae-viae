@@ -11,6 +11,9 @@ use super::truncate_output;
     required(path)
 )]
 pub fn file_read(path: String) -> Result<String, ToolError> {
+    super::tool_policy()
+        .check_path(&path)
+        .map_err(|e| ToolError::ToolCallError(e.into()))?;
     let contents = std::fs::read_to_string(&path).map_err(
         |e| -> Box<dyn std::error::Error + Send + Sync> {
             format!("Cannot read file '{path}': {e}").into()

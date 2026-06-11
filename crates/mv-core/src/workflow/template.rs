@@ -28,6 +28,18 @@ pub fn render_template(
         })
 }
 
+/// Parse `template` with the same engine used for rendering and return the
+/// variables it references. This is what keeps validation and rendering
+/// speaking one template language — a naive `{{…}}` scan would reject valid
+/// minijinja (filters, `{%- -%}` trim markers) and miss `{% if %}` blocks.
+pub fn template_references(template: &str) -> Result<std::collections::HashSet<String>, String> {
+    let mut env = minijinja::Environment::new();
+    env.add_template("__inline", template)
+        .map_err(|e| e.to_string())?;
+    let tmpl = env.get_template("__inline").map_err(|e| e.to_string())?;
+    Ok(tmpl.undeclared_variables(false))
+}
+
 /// Load a template from a file, resolving the path relative to the workflow directory.
 pub fn load_template_file(template_path: &str, workflow_dir: &Path) -> Result<String, MvError> {
     let resolved = workflow_dir.join(template_path);

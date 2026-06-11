@@ -197,7 +197,57 @@ $ cargo run -p mv-cli -- -m llama-fp8 --stream --no-tools "Explain Rust ownershi
 
 ---
 
-## Phase 5: Advanced Routing & RAG (Weeks 15-18)
+## Phase 4.6: Consolidation (Weeks 15-16)
+
+**Goal**: Make the shipped feature set true, tested, and load-bearing before Phase 5
+builds on it. No new features.
+
+Driven by the post-007 review in [docs/fable/](fable/README.md); finding IDs (F1–F34)
+reference [docs/fable/02-findings.md](fable/02-findings.md). Sprint directory:
+`specs/008-consolidation/`.
+
+### Tasks
+- [x] Correctness (F1–F10): UTF-8 truncation panic, real workflow `ToolExecutor`,
+      wire `temperature`/`max_tokens`, retry-config panic, shell child-process leak,
+      shell exit-status visibility, MCP output truncation, silent default-model
+      substitution, max-turns classification, `--json` error channel
+- [x] Phase-5 seam (F11–F14): extract `complete()` dispatch, typed error
+      classification in `mv-core` + `is_fallback_eligible()`, `Provider` enum,
+      `ModelRegistry` validation
+- [x] Engine prep (F15–F18): extract `execute_step`/`execute_steps`, encapsulate
+      `ExecutionContext`, `Send` bounds on executor traits, one template language,
+      output-collision validation; decide the String→Value context migration
+- [x] `ToolPolicy` seam, default-allow (F19)
+- [x] Test infrastructure (F25–F28): wiremock fake-proxy fixture, fake stdio MCP
+      server, hermetic CLI tests, end-to-end workflow test
+- [x] Docs truth pass (F29–F34): README quickstart, docs/01 refresh, docs/06
+      not-implemented tags, spec hygiene
+
+### Deliverable
+- Every feature claimed by README/docs works as documented
+- `just ci` exercises a successful model call and a full workflow hermetically
+- Phase 5 fallback/routing has a single dispatch seam and machine-readable
+  failure classes to build on
+
+### Lessons Learned
+- A green gate only certifies what it exercises: workflow tool steps and
+  sampling params shipped non-functional behind 189 passing tests because no
+  hermetic test ever ran a successful completion or a full workflow. The
+  wiremock fake-proxy fixture closed that class of gap (and cut the suite
+  from ~35s to ~1.3s).
+- rig's typestate `AgentBuilder<M, P, ToolState>` unifies across providers
+  with plain generic helpers — no `dyn` provider abstraction was needed for
+  a single dispatch seam; fallback chains operate at the `Result` level.
+- Validation and rendering must share one template engine: the naive
+  `{{…}}` scanner rejected valid minijinja (filters) and missed `{% if %}`
+  references. `Template::undeclared_variables()` is the single source.
+- `Send` bounds on async traits are cheap with two implementors and breaking
+  with ten — typestate/trait shape changes belong in consolidation windows,
+  not feature sprints.
+
+---
+
+## Phase 5: Advanced Routing & RAG (Weeks 17-20)
 
 **Goal**: Adaptive model routing and RAG integration.
 
@@ -217,7 +267,7 @@ $ cargo run -p mv-cli -- -m llama-fp8 --stream --no-tools "Explain Rust ownershi
 
 ---
 
-## Phase 6: Always-On Agent (Weeks 19-22)
+## Phase 6: Always-On Agent (Weeks 21-24)
 
 **Goal**: Long-running agent service with API and monitoring capabilities.
 
@@ -237,7 +287,7 @@ $ cargo run -p mv-cli -- -m llama-fp8 --stream --no-tools "Explain Rust ownershi
 
 ---
 
-## Phase 7: Polish & Dashboard Foundation (Weeks 23+)
+## Phase 7: Polish & Dashboard Foundation (Weeks 25+)
 
 **Goal**: Production-grade telemetry export and dashboard-ready APIs.
 

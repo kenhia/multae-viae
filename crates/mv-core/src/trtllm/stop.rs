@@ -33,7 +33,7 @@ mod tests {
     fn trtllm_entry(stop: Option<Vec<String>>) -> ModelEntry {
         ModelEntry {
             id: "llama-fp8".to_string(),
-            provider: "trtllm".to_string(),
+            provider: crate::Provider::Trtllm,
             locality: None,
             api_key_env: None,
             endpoint: None,
@@ -43,6 +43,7 @@ mod tests {
             quant: None,
             expected_vram_gb: None,
             stop_sequences: stop,
+            max_turns: None,
         }
     }
 
@@ -75,7 +76,7 @@ mod tests {
     #[test]
     fn non_trtllm_entry_with_no_stop_returns_none() {
         let mut entry = trtllm_entry(None);
-        entry.provider = "ollama".to_string();
+        entry.provider = crate::Provider::Ollama;
         assert!(request_stop_value(&entry).is_none());
     }
 }

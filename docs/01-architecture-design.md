@@ -46,19 +46,26 @@ The heart of the system. Responsible for:
 
 **Implementation** (`crates/mv-core/src/workflow/`):
 
-The DSL engine is implemented as a module within `mv-core`:
+The DSL engine is implemented as a module within `mv-core` and has **no
+dependency on Rig or any provider** — it is generic over `PromptExecutor` /
+`ToolExecutor` traits (both `Send`-bounded) and unit-tested with mocks:
 
 - `types.rs` — Workflow, Step (prompt/tool/transform), Input, Output types
   with `#[serde(deny_unknown_fields)]` for strict YAML parsing
 - `parser.rs` — YAML loading via `serde_yml` with error mapping
-- `validate.rs` — Structural validation (duplicate IDs, unresolvable refs,
-  circular references, template checks)
+- `validate.rs` — Structural validation (duplicate step IDs, duplicate
+  output names, unresolvable refs, circular references, retry config,
+  template syntax/reference checks via minijinja — including
+  `template_file` contents)
 - `template.rs` — Variable interpolation using `minijinja` with
   `{{variable}}` syntax; supports inline templates and external template files
-- `engine.rs` — Sequential execution engine with `PromptExecutor` and
-  `ToolExecutor` traits for testability; handles error strategies
-  (skip/fail/retry), transform operations (`extract_json`), and
-  OpenTelemetry instrumentation
+- `engine.rs` — Sequential execution engine; an encapsulated
+  `ExecutionContext` where step outputs shadow workflow inputs; the default
+  model is a required parameter (no hardcoded fallback)
+- `retry.rs` — skip/fail/retry error strategies; retry re-attempts only
+  transient (`is_retryable()`) errors, with configurable `base_delay_ms`,
+  exponential or fixed backoff, and a 30s delay cap
+- `transform.rs` — Transform operations (currently only `extract_json`)
 
 CLI subcommands `workflow run` and `workflow validate` are exposed via
 `mv-cli` using `clap` subcommand groups.
@@ -71,9 +78,13 @@ trait WorkflowEngine {
 }
 ```
 
-#### Model Router
+#### Model Router *(future — Phase 5)*
 
-Selects the appropriate model for each task. Supports three modes:
+Will select the appropriate model for each task. Sprint 008 laid the
+groundwork: a single `complete()` dispatch seam in `mv-cli/src/providers.rs`,
+typed error classification in `mv_core::providers`, and
+`MvError::is_fallback_eligible()` so a fallback chain can distinguish
+backend-dead failures from user errors. Planned modes:
 
 1. **Prescriptive**: DSL specifies exact model per step
 2. **Adaptive**: Router selects based on task metadata (complexity, domain,
@@ -87,10 +98,17 @@ See [07 — Model Routing](07-model-routing.md) for detailed strategies.
 
 Manages available tools from multiple sources:
 
-- **MCP Servers**: Discovered dynamically via MCP protocol
-- **Built-in Tools**: File I/O, shell execution, HTTP requests
-- **Custom Tools**: User-defined Rust functions registered at startup
-- **Remote Tools**: Accessible via MCP over HTTP/WebSocket
+- **MCP Servers**: Discovered dynamically via MCP protocol (stdio and
+  streamable-HTTP transports, configured in `mcp-servers.yaml`)
+- **Built-in Tools**: File I/O, shell execution, HTTP requests — gated
+  behind the `ToolPolicy` seam (default-allow today; Phase 7 sandboxing
+  lands as deny rules on this type)
+- **Custom Tools** *(future)*: User-defined Rust functions registered at startup
+- **Remote Tools**: Accessible via MCP over HTTP
+
+MCP tools merge into the same tool set the model sees; built-in tools take
+precedence on name collision, MCP server failures are logged and skipped,
+and all tool output (built-in and MCP) truncates at 10,000 chars.
 
 ```rust
 trait ToolRegistry {
@@ -100,9 +118,9 @@ trait ToolRegistry {
 }
 ```
 
-#### Context Manager
+#### Context Manager *(future)*
 
-Maintains the environmental context for agent operations:
+Will maintain the environmental context for agent operations:
 
 - System information (OS, hardware, running processes)
 - User preferences and history
@@ -129,9 +147,15 @@ Abstraction over multiple inference providers:
 |---------|-----------|----------|
 | Ollama | HTTP API (localhost:11434) | Primary local inference, model management |
 | TensorRT-LLM | OpenAI-compatible API (localhost:8003/v1) | High-performance local GPU inference via OpenAI-compatible proxy |
-| mistral.rs | Embedded Rust library | High-performance embedded inference |
-| OpenAI-compatible | HTTP API | Cloud fallback (OpenAI, Anthropic, etc.) |
-| Rig providers | HTTP API | 20+ providers via unified interface |
+| OpenAI-compatible | HTTP API | Cloud fallback (OpenAI, etc.) |
+| mistral.rs *(future)* | Embedded Rust library | High-performance embedded inference |
+
+`Provider` is a **closed enum** (`ollama` / `openai` / `trtllm`): an unknown
+provider string in `models.yaml` is rejected at config load with the list of
+valid values, instead of resolving to fictitious defaults and failing at call
+time. The registry also rejects duplicate model ids, multiple `default: true`
+entries, and unknown `ModelEntry` fields; a missing config file reports
+`Config file not found` rather than a parse error.
 
 **TRT-LLM Provider** (`crates/mv-core/src/trtllm/`):
 
@@ -139,14 +163,22 @@ The TRT-LLM provider uses Rig's `CompletionsClient` (not the default
 `openai::Client` which targets the Responses API) since the TRT-LLM proxy exposes
 an OpenAI-compatible `/v1/chat/completions` endpoint. The provider module adds:
 
-- `health.rs` — Pre-prompt health check against `/health` endpoint (2s timeout)
-- Provider dispatch in `mv-cli` with `call_trtllm()` wrapper for telemetry
+- `health.rs` — Pre-prompt health check against `/health` endpoint (2s
+  timeout) plus a served-model preflight for the streaming path
+- `stop.rs` — Provider-default stop sequences (`</s>`, `<|im_end|>`,
+  `<|eot_id|>`) forwarded via Rig `additional_params`
+- `usage.rs` — Lenient token-usage deserialization, recorded as
+  `gen_ai.usage.{input,output}_tokens` span attributes
+- Provider dispatch in `mv-cli/src/providers.rs` (`call_trtllm()` /
+  `stream_trtllm()` sharing preflight, agent builder, and usage helpers)
 - `gen_ai.system = "trtllm"` span attribute for OpenTelemetry traces
 - `served_name` field on `ModelEntry` for HuggingFace path → short name mapping
+- A 502 from the proxy classifies as `ModelNotLoaded` with a
+  `Run: just load <id>` hint (referring to the *trt-llm-explore* justfile)
 
-#### RAG Client
+#### RAG Client *(future — Phase 5)*
 
-Connects to a RAG service on the local network:
+Will connect to a RAG service on the local network:
 
 - Embedding generation (local via Candle/Ollama or remote)
 - Vector store queries (Qdrant, LanceDB)
@@ -173,10 +205,13 @@ First-class requirement. See [05 — Telemetry](05-telemetry-observability.md).
 
 YAML-based workflow definitions. See [06 — DSL Design](06-dsl-flow-management.md).
 
-#### Security
+#### Security *(future — Phase 7)*
 
 - API authentication for remote access
-- Tool execution sandboxing
+- Tool execution sandboxing — the hook point exists today:
+  `mv_core::tools::ToolPolicy` (default-allow) is consulted by all four
+  built-in tools, so sandboxing lands as a policy implementation, not a
+  tool rewrite
 - Secret management for API keys
 - Audit logging of all tool executions
 
@@ -236,40 +271,75 @@ User Goal
                     └──────────┘
 ```
 
-## Crate Structure (Proposed)
+## Crate Structure
+
+A deliberately small two-crate workspace. The originally proposed satellite
+crates (`mv-engine`, `mv-mcp`, `mv-dsl`, `mv-telemetry`) were absorbed into
+`mv-core` as modules — the standing rule is **anything a future `mv-server`
+needs lives in `mv-core`**; the binary crate holds only CLI concerns.
 
 ```
 multae-viae/
-├── Cargo.toml              # Workspace root
+├── Cargo.toml              # Workspace root (resolver = "3", edition 2024)
 ├── crates/
-│   ├── mv-core/            # Core types, traits, error handling
+│   ├── mv-core/            # Library: all reusable logic
 │   │   └── src/
-│   │       ├── lib.rs       # ModelRegistry, MvError, validation
-│   │       └── tools/       # Built-in tool implementations
-│   │           ├── mod.rs    # Constants, truncation helper
-│   │           ├── file_list.rs
-│   │           ├── file_read.rs
-│   │           ├── shell_exec.rs
-│   │           └── http_get.rs
+│   │       ├── lib.rs       # ModelEntry/ModelRegistry, Provider enum, MvError
+│   │       ├── providers.rs # SYSTEM_PREAMBLE, error classification,
+│   │       │                #   is_fallback_eligible / is_retryable taxonomy
+│   │       ├── mcp/         # MCP config, RMCP client, tool registry merge
+│   │       ├── tools/       # Built-in tools + ToolPolicy seam
+│   │       │   ├── mod.rs    # ToolPolicy, constants, truncation helper
+│   │       │   ├── file_list.rs
+│   │       │   ├── file_read.rs
+│   │       │   ├── shell_exec.rs
+│   │       │   └── http_get.rs
+│   │       ├── trtllm/      # health.rs, stop.rs, usage.rs
+│   │       └── workflow/    # DSL engine (rig-free)
+│   │           ├── types.rs / parser.rs / validate.rs / template.rs
+│   │           └── engine.rs / retry.rs / transform.rs
 │   ├── mv-cli/             # CLI binary
 │   │   └── src/
-│   │       └── main.rs      # Agent builder with tools, preamble, telemetry
-│   ├── mv-engine/          # Workflow engine, step execution (future)
-│   ├── mv-router/          # Model routing logic (future)
-│   ├── mv-mcp/             # MCP client integration (future)
-│   ├── mv-telemetry/       # OTel setup, custom spans/metrics (future)
-│   ├── mv-dsl/             # YAML DSL parser and validator (future)
-│   ├── mv-rag/             # RAG client, embedding pipeline (future)
-│   └── mv-server/          # gRPC/REST API server (future)
+│   │       ├── main.rs      # Output contract (stdout/stderr × --json), dispatch
+│   │       ├── cli.rs       # clap definitions
+│   │       ├── providers.rs # complete() — the single provider dispatch seam
+│   │       ├── telemetry.rs # tracing + OTLP-HTTP exporter wiring
+│   │       ├── executors.rs # RigPromptExecutor / HandleToolExecutor
+│   │       └── commands/    # prompt.rs, workflow.rs
+│   └── mv-server/          # gRPC/REST API server (future — Phase 6)
 ├── docs/                   # This documentation
-└── specs/                  # Iteration specifications
+├── specs/                  # Sprint specifications (SDD)
+└── workflows/              # Example workflow YAML files
 ```
 
-## Current Implementation: Tool System
+## Current Implementation (through Sprint 008)
 
-As of Sprint 003, the CLI operates as an agentic system with built-in tools. The
+The CLI operates as an agentic system with built-in tools (Sprint 003). The
 architecture uses Rig's native multi-turn agent loop — tools are registered with
 the agent builder and the model decides when and how to invoke them.
+
+Subsequent sprints layered on:
+
+- **Sprint 004 — MCP**: external MCP servers (stdio + streamable-HTTP)
+  configured via `mcp-servers.yaml` merge into the same tool set; built-ins
+  win name collisions, failed servers are skipped, connections shut down
+  gracefully on exit.
+- **Sprint 005 — DSL engine**: `mv_core::workflow` executes YAML workflows
+  (prompt/tool/transform steps) through executor traits, keeping the engine
+  free of Rig and provider dependencies.
+- **Sprints 006/007 — TRT-LLM**: third provider via the OpenAI-compatible
+  proxy; health preflight, stop-sequence defaults, token-usage telemetry,
+  502 → `ModelNotLoaded` classification, and `--stream` (TRT-LLM only;
+  `--no-tools` required for genuine streaming).
+- **Sprint 008 — consolidation**: one `complete()` dispatch seam shared by
+  the prompt command and the workflow executor (the Phase 5 fallback-chain
+  hook); `SYSTEM_PREAMBLE` and typed-first error classification moved to
+  `mv_core::providers`; closed `Provider` enum and registry validation;
+  workflow tool steps execute real built-in/MCP tools via
+  `HandleToolExecutor`; `temperature`/`max_tokens` honored;
+  `ToolPolicy` seam for Phase 7 sandboxing; new `MvError` variants
+  (`MaxTurnsExceeded`, `ToolCallFailed`, `WorkflowStepError`,
+  `ConfigNotFound`); `--json` errors print to stderr (channel unchanged).
 
 ### Tool Architecture
 
@@ -279,10 +349,11 @@ User Prompt
     ▼
 ┌───────────────────────────────────┐
 │  Agent (Rig AgentBuilder)         │
-│  ├── preamble (system prompt)     │
+│  ├── preamble (SYSTEM_PREAMBLE)   │
 │  ├── tools: [FileList, FileRead,  │
-│  │           ShellExec, HttpGet]  │
-│  └── default_max_turns(10)        │
+│  │     ShellExec, HttpGet] + MCP  │
+│  └── default_max_turns            │
+│      (ModelEntry.max_turns ?? 10) │
 └───────────────┬───────────────────┘
                 │
     ┌───────────▼────────────┐
@@ -321,18 +392,21 @@ the failure without crashing the session.
 
 ## Technology Stack Summary
 
+Current dependencies (see the crate `Cargo.toml`s):
+
 | Category | Technology | Crate |
 |----------|-----------|-------|
 | Async Runtime | Tokio | `tokio` |
 | HTTP Client | reqwest | `reqwest` |
-| HTTP Server | axum or tonic | `axum` / `tonic` |
-| Serialization | serde + serde_yaml + serde_json | `serde`, `serde_yaml`, `serde_json` |
+| Serialization | serde + serde_yml + serde_json | `serde`, `serde_yml`, `serde_json` |
+| Templating | minijinja | `minijinja` |
 | Agent Framework | Rig | `rig-core` |
 | MCP | RMCP | `rmcp` |
-| Telemetry | OpenTelemetry | `opentelemetry`, `opentelemetry-otlp` |
+| Telemetry | OpenTelemetry | `opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp` |
 | Tracing | tracing ecosystem | `tracing`, `tracing-subscriber`, `tracing-opentelemetry` |
 | CLI | clap | `clap` |
-| Error Handling | anyhow + thiserror | `anyhow`, `thiserror` |
-| ML Framework | Candle | `candle-core`, `candle-nn` |
-| Local Inference | Ollama API | `ollama-rs` or HTTP via `reqwest` |
-| Embedded Inference | mistral.rs | `mistralrs` |
+| Error Handling | thiserror (single `MvError` enum) | `thiserror` |
+| Local Inference | Ollama + TRT-LLM proxy, via Rig's HTTP providers | `rig-core` |
+
+Future (not yet dependencies): an HTTP/gRPC server stack for `mv-server`
+(Phase 6) and an embedded-inference backend (mistral.rs) if adopted.
