@@ -85,6 +85,24 @@ impl Usage {
             output_tokens: usage.output_tokens,
         })
     }
+
+    /// Build from raw counts (e.g. a rig `Usage` struct's fields).
+    pub fn from_counts(input_tokens: u64, output_tokens: u64) -> Self {
+        Usage {
+            input_tokens,
+            output_tokens,
+        }
+    }
+
+    /// Record non-zero counts on `span` using the OpenTelemetry GenAI
+    /// attribute names. The single recording path for buffered, streaming,
+    /// and workflow completions — keep span-attribute naming here.
+    pub fn record_on(&self, span: &tracing::Span) {
+        if self.input_tokens != 0 || self.output_tokens != 0 {
+            span.record("gen_ai.usage.input_tokens", self.input_tokens);
+            span.record("gen_ai.usage.output_tokens", self.output_tokens);
+        }
+    }
 }
 
 #[cfg(test)]

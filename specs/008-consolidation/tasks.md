@@ -52,24 +52,26 @@ missing. Live-backend tests stay `#[ignore]`d.
 
 ## Phase 2: WS2 — Phase-5 seam
 
-- [ ] T011 [WS2] Create `crates/mv-core/src/providers.rs`: move `SYSTEM_PREAMBLE`,
+- [X] T011 [WS2] Create `crates/mv-core/src/providers.rs`: move `SYSTEM_PREAMBLE`,
   add `classify_backend_error` (typed-first, string fallback) and
   `MvError::is_fallback_eligible()`; re-point mv-cli; tests move/extend (F12, F20)
-- [ ] T012 [WS2] `Provider` enum (serde) replacing stringly `ModelEntry.provider`;
+- [X] T012 [WS2] `Provider` enum (serde) replacing stringly `ModelEntry.provider`;
   reject unknown providers at registry load with available list; collapse
   provider `match` arms into enum methods (F13)
-- [ ] T013 [WS2] `ModelRegistry` validation: duplicate ids, multiple defaults;
+- [X] T013 [WS2] `ModelRegistry` validation: duplicate ids, multiple defaults;
   `ConfigNotFound` variant for missing file; `deny_unknown_fields` on
   `ModelEntry`; delete dead `BackendConfig` (F14, F24)
-- [ ] T014 [WS2] Extract `async fn complete(entry, params, handle) ->
-  Result<CompletionOutcome, MvError>` unifying both dispatch sites; generic
-  `configure_agent`/`run_agent` helpers over `AgentBuilder<M>`; `stream_trtllm`
-  shares preflight/builder/usage helpers with `call_trtllm` (F11)
-- [ ] T015 [P] [WS2] `ModelEntry::effective_max_turns()` (default 10) replacing
+- [X] T014 [WS2] Extract `async fn complete(entry, endpoint, prompt, handle,
+  params)` unifying both dispatch sites; `stream_trtllm` shares
+  preflight/builder/usage helpers with `call_trtllm` (F11). *Deviation:
+  returns `String`, not a `CompletionOutcome` struct — a one-field wrapper
+  adds nothing today (YAGNI); introduce it when the Phase 5 router needs a
+  second field (usage, model-used).*
+- [X] T015 [P] [WS2] `ModelEntry::effective_max_turns()` (default 10) replacing
   five hardcoded sites; `api_key_env()` resolver; hoist trtllm hint const (F21)
-- [ ] T016 [P] [WS2] Use `Usage::from_rig()` + a `record_on(span)` helper for all
+- [X] T016 [P] [WS2] Use `Usage::from_rig()` + a `record_on(span)` helper for all
   usage recording (buffered + streaming) (F-cli-I9)
-- [ ] T017 [WS2] Split `crates/mv-cli/src/main.rs` into `cli.rs`, `providers.rs`,
+- [X] T017 [WS2] Split `crates/mv-cli/src/main.rs` into `cli.rs`, `providers.rs`,
   `telemetry.rs`, `commands/{prompt,workflow}.rs`, `executors.rs` (F20)
 
 **Checkpoint**: one dispatch seam; mv-server-bound logic lives in mv-core.

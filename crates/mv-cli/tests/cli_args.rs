@@ -80,7 +80,7 @@ fn json_error_goes_to_stderr_not_stdout() {
         .failure()
         .code(1)
         .stderr(predicate::str::contains(r#"{"error""#))
-        .stderr(predicate::str::contains("Failed to parse config"))
+        .stderr(predicate::str::contains("Config file not found"))
         .stdout(predicate::str::is_empty());
 }
 
