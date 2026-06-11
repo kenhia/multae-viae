@@ -22,6 +22,10 @@ pub enum ValidationError {
         step_id: String,
         operation: String,
     },
+    InvalidRetryConfig {
+        step_id: String,
+        details: String,
+    },
 }
 
 impl std::fmt::Display for ValidationError {
@@ -56,6 +60,9 @@ impl std::fmt::Display for ValidationError {
                     f,
                     "step '{step_id}' uses unknown transform operation '{operation}'"
                 )
+            }
+            Self::InvalidRetryConfig { step_id, details } => {
+                write!(f, "step '{step_id}' has invalid retry config: {details}")
             }
         }
     }
@@ -117,6 +124,16 @@ pub fn validate(workflow: &Workflow) -> Vec<ValidationError> {
                 }
             }
             Step::Tool(ts) => {
+                // Retry config: zero attempts would mean "never execute".
+                if let Some(retry) = &ts.retry
+                    && retry.max_attempts == 0
+                {
+                    errors.push(ValidationError::InvalidRetryConfig {
+                        step_id: ts.id.clone(),
+                        details: "max_attempts must be at least 1".to_string(),
+                    });
+                }
+
                 // Check tool input template references
                 for val in ts.inputs.values() {
                     if let Some(s) = val.as_str() {
@@ -361,6 +378,46 @@ outputs:
             e,
             ValidationError::MissingStepOutput { step_id, .. } if step_id == "nonexistent"
         )));
+    }
+
+    #[test]
+    fn retry_zero_attempts_rejected() {
+        let yaml = r#"
+name: test
+version: "1.0"
+steps:
+  - id: s1
+    type: tool
+    output: out
+    tool: file_list
+    on_error: retry
+    retry:
+      max_attempts: 0
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let errors = validate(&wf);
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidRetryConfig { step_id, .. } if step_id == "s1"
+        )));
+    }
+
+    #[test]
+    fn retry_one_attempt_is_valid() {
+        let yaml = r#"
+name: test
+version: "1.0"
+steps:
+  - id: s1
+    type: tool
+    output: out
+    tool: file_list
+    on_error: retry
+    retry:
+      max_attempts: 1
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        assert!(validate(&wf).is_empty());
     }
 
     #[test]

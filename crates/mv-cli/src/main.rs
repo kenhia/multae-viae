@@ -15,6 +15,33 @@ Use the available tools to answer questions that require interacting with the lo
 If a question can be answered from your own knowledge, respond directly without using tools. \
 When you use a tool, incorporate the result into a clear, human-readable response.";
 
+/// Optional sampling parameters forwarded to the provider (set by workflow
+/// steps; the plain prompt path uses provider defaults).
+#[derive(Debug, Default, Clone, Copy)]
+struct GenParams {
+    temperature: Option<f64>,
+    max_tokens: Option<u64>,
+}
+
+impl GenParams {
+    fn apply<M, P, T>(
+        &self,
+        mut builder: rig::agent::AgentBuilder<M, P, T>,
+    ) -> rig::agent::AgentBuilder<M, P, T>
+    where
+        M: rig::completion::CompletionModel,
+        P: rig::agent::PromptHook<M>,
+    {
+        if let Some(t) = self.temperature {
+            builder = builder.temperature(t);
+        }
+        if let Some(m) = self.max_tokens {
+            builder = builder.max_tokens(m);
+        }
+        builder
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "mv-cli", version, about = "Send a prompt to a local LLM")]
 struct Cli {
@@ -197,16 +224,25 @@ async fn run_prompt(
         connect_mcp_servers(args.mcp_config.as_deref(), &agent_handle).await?
     };
 
+    let params = GenParams::default();
     let result = if stream_trtllm_path {
         stream_trtllm(entry, &endpoint, prompt, agent_handle).await
     } else {
         match entry.provider.as_str() {
-            "ollama" => call_ollama(&entry.id, &endpoint, prompt, agent_handle).await,
+            "ollama" => call_ollama(&entry.id, &endpoint, prompt, agent_handle, &params).await,
             "openai" => {
                 let env_var = entry.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY");
                 match std::env::var(env_var) {
                     Ok(api_key) => {
-                        call_openai(&entry.id, &endpoint, &api_key, prompt, agent_handle).await
+                        call_openai(
+                            &entry.id,
+                            &endpoint,
+                            &api_key,
+                            prompt,
+                            agent_handle,
+                            &params,
+                        )
+                        .await
                     }
                     Err(_) => Err(mv_core::MvError::ApiKeyMissing {
                         provider: entry.provider.clone(),
@@ -214,7 +250,7 @@ async fn run_prompt(
                     }),
                 }
             }
-            "trtllm" => call_trtllm(entry, &endpoint, prompt, agent_handle).await,
+            "trtllm" => call_trtllm(entry, &endpoint, prompt, agent_handle, &params).await,
             other => Err(mv_core::MvError::CompletionFailed {
                 details: format!("unsupported provider: {other}"),
             }),
@@ -267,6 +303,7 @@ async fn call_ollama(
     endpoint: &str,
     prompt: &str,
     handle: ToolServerHandle,
+    params: &GenParams,
 ) -> Result<String, mv_core::MvError> {
     use rig::client::{CompletionClient, Nothing};
 
@@ -281,12 +318,12 @@ async fn call_ollama(
             hint: "Is Ollama running?".to_string(),
         })?;
 
-    let agent = client
+    let builder = client
         .agent(model)
         .preamble(SYSTEM_PREAMBLE)
         .tool_server_handle(handle)
-        .default_max_turns(10)
-        .build();
+        .default_max_turns(10);
+    let agent = params.apply(builder).build();
 
     info!("sending prompt to model");
     let response = agent.prompt(prompt).await.map_err(|e| {
@@ -307,6 +344,7 @@ async fn call_openai(
     api_key: &str,
     prompt: &str,
     handle: ToolServerHandle,
+    params: &GenParams,
 ) -> Result<String, mv_core::MvError> {
     use rig::client::CompletionClient;
 
@@ -321,12 +359,12 @@ async fn call_openai(
             hint: "Check the endpoint URL.".to_string(),
         })?;
 
-    let agent = client
+    let builder = client
         .agent(model)
         .preamble(SYSTEM_PREAMBLE)
         .tool_server_handle(handle)
-        .default_max_turns(10)
-        .build();
+        .default_max_turns(10);
+    let agent = params.apply(builder).build();
 
     info!("sending prompt to model");
     let response = agent.prompt(prompt).await.map_err(|e| {
@@ -352,6 +390,7 @@ async fn call_trtllm(
     endpoint: &str,
     prompt: &str,
     handle: ToolServerHandle,
+    params: &GenParams,
 ) -> Result<String, mv_core::MvError> {
     let trtllm_hint = "Start the server with: trtllm-serve <model-path>".to_string();
 
@@ -397,7 +436,7 @@ async fn call_trtllm(
     if let Some(stop_value) = mv_core::trtllm::stop::request_stop_value(entry) {
         builder = builder.additional_params(stop_value);
     }
-    let agent = builder.build();
+    let agent = params.apply(builder).build();
 
     info!("sending prompt to model");
     let response = agent.prompt(prompt).extended_details().await.map_err(|e| {
@@ -579,6 +618,16 @@ fn classify_rig_error(
             model: id.to_string(),
             hint: format!("Run: just load {id}"),
         }
+    } else if msg.contains("MaxTurnError") || msg.contains("max turn limit") {
+        // rig 0.35 surfaces turn exhaustion as
+        // "MaxTurnError: (reached max turn limit: 10)" — map it to an
+        // actionable error instead of leaking the raw string.
+        let turns = msg
+            .rsplit("max turn limit:")
+            .next()
+            .and_then(|s| s.trim().trim_end_matches(')').trim().parse::<u64>().ok())
+            .unwrap_or(10);
+        mv_core::MvError::MaxTurnsExceeded { turns }
     } else if msg.contains("connection")
         || msg.contains("Connection")
         || msg.contains("connect")
@@ -611,9 +660,12 @@ fn print_success(response: &str, json: bool) {
 }
 
 fn print_error(err: &mv_core::MvError, json: bool) {
+    // Errors always go to stderr — `--json` only changes the shape, not the
+    // channel, so `mv-cli --json ... | jq .response` never sees an error
+    // object on the success stream.
     if json {
         let obj = serde_json::json!({ "error": err.to_string() });
-        println!("{}", obj);
+        eprintln!("{}", obj);
     } else {
         eprintln!("Error: {err}");
     }
@@ -811,9 +863,11 @@ async fn run_workflow(args: &WorkflowRunArgs, json: bool) -> Result<(), mv_core:
 
     let prompt_exec = RigPromptExecutor {
         registry,
-        agent_handle,
+        agent_handle: agent_handle.clone(),
     };
-    let tool_exec = NoopToolExecutor;
+    let tool_exec = HandleToolExecutor {
+        handle: agent_handle,
+    };
 
     let workflow_dir = path.parent().unwrap_or(Path::new("."));
     let result = mv_core::workflow::engine::execute_workflow(
@@ -884,23 +938,35 @@ impl mv_core::workflow::engine::PromptExecutor for RigPromptExecutor {
         &self,
         prompt_text: &str,
         model: &str,
-        _temperature: Option<f64>,
-        _max_tokens: Option<u64>,
+        temperature: Option<f64>,
+        max_tokens: Option<u64>,
     ) -> Result<String, mv_core::MvError> {
-        let entry = self
-            .registry
-            .get(model)
-            .or_else(|| {
-                // Fall back to default model if the specified one isn't in registry
-                Some(self.registry.default_model())
-            })
-            .unwrap();
+        // A typo'd model must fail loudly — silently substituting the default
+        // model would run the step elsewhere and report success.
+        let entry =
+            self.registry
+                .get(model)
+                .ok_or_else(|| mv_core::MvError::ModelNotInRegistry {
+                    model: model.to_string(),
+                    available: self.registry.available_ids().join(", "),
+                })?;
 
         let endpoint = entry.endpoint();
+        let params = GenParams {
+            temperature,
+            max_tokens,
+        };
 
         match entry.provider.as_str() {
             "ollama" => {
-                call_ollama(&entry.id, &endpoint, prompt_text, self.agent_handle.clone()).await
+                call_ollama(
+                    &entry.id,
+                    &endpoint,
+                    prompt_text,
+                    self.agent_handle.clone(),
+                    &params,
+                )
+                .await
             }
             "openai" => {
                 let env_var = entry.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY");
@@ -915,10 +981,20 @@ impl mv_core::workflow::engine::PromptExecutor for RigPromptExecutor {
                     &api_key,
                     prompt_text,
                     self.agent_handle.clone(),
+                    &params,
                 )
                 .await
             }
-            "trtllm" => call_trtllm(entry, &endpoint, prompt_text, self.agent_handle.clone()).await,
+            "trtllm" => {
+                call_trtllm(
+                    entry,
+                    &endpoint,
+                    prompt_text,
+                    self.agent_handle.clone(),
+                    &params,
+                )
+                .await
+            }
             other => Err(mv_core::MvError::CompletionFailed {
                 details: format!("unsupported provider: {other}"),
             }),
@@ -926,18 +1002,28 @@ impl mv_core::workflow::engine::PromptExecutor for RigPromptExecutor {
     }
 }
 
-/// Placeholder tool executor — tool steps are not yet fully wired to built-in tools.
-struct NoopToolExecutor;
+/// Tool executor that runs workflow tool steps against the shared agent
+/// ToolServer — the same merged built-in + MCP tool set the agent sees.
+struct HandleToolExecutor {
+    handle: ToolServerHandle,
+}
 
-impl mv_core::workflow::engine::ToolExecutor for NoopToolExecutor {
+impl mv_core::workflow::engine::ToolExecutor for HandleToolExecutor {
+    #[tracing::instrument(level = "info", skip(self, inputs), fields(tool.name = %tool_name))]
     async fn execute_tool(
         &self,
         tool_name: &str,
-        _inputs: &std::collections::HashMap<String, serde_json::Value>,
+        inputs: &std::collections::HashMap<String, serde_json::Value>,
     ) -> Result<String, mv_core::MvError> {
-        Err(mv_core::MvError::WorkflowStepFailed {
-            step: String::new(),
-            details: format!("tool execution not yet implemented for '{tool_name}'"),
+        let args = serde_json::to_string(inputs).map_err(|e| mv_core::MvError::ToolCallFailed {
+            tool: tool_name.to_string(),
+            details: format!("failed to encode inputs: {e}"),
+        })?;
+        self.handle.call_tool(tool_name, &args).await.map_err(|e| {
+            mv_core::MvError::ToolCallFailed {
+                tool: tool_name.to_string(),
+                details: e.to_string(),
+            }
         })
     }
 }
@@ -988,6 +1074,39 @@ mod tests {
             }
             other => panic!("expected ModelNotLoaded, got: {other:?}"),
         }
+    }
+
+    // 008/F7: rig's turn-limit exhaustion must map to an actionable error,
+    // not leak as a raw "MaxTurnError" string (which previously surfaced as
+    // CompletionFailed and discarded the context of 10 turns of tool work).
+    #[test]
+    fn classify_rig_error_max_turns_maps_to_dedicated_variant() {
+        let err = classify_rig_error(
+            "MaxTurnError: (reached max turn limit: 10)",
+            "qwen3:8b",
+            "http://localhost:11434",
+            "Is Ollama running?",
+            None,
+        );
+        match err {
+            mv_core::MvError::MaxTurnsExceeded { turns } => assert_eq!(turns, 10),
+            other => panic!("expected MaxTurnsExceeded, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_rig_error_max_turns_unparseable_count_defaults() {
+        let err = classify_rig_error(
+            "MaxTurnError: something unexpected",
+            "qwen3:8b",
+            "http://localhost:11434",
+            "Is Ollama running?",
+            None,
+        );
+        assert!(matches!(
+            err,
+            mv_core::MvError::MaxTurnsExceeded { turns: 10 }
+        ));
     }
 
     #[test]

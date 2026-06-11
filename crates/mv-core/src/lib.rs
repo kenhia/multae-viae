@@ -201,6 +201,15 @@ pub enum MvError {
     #[error("streaming is only supported for TRT-LLM models in this release")]
     StreamingNotSupported,
 
+    #[error(
+        "Model hit the agentic turn limit ({turns} turns) without a final answer. \
+         Try a simpler prompt, or --no-tools if tools are not needed."
+    )]
+    MaxTurnsExceeded { turns: u64 },
+
+    #[error("tool '{tool}' failed: {details}")]
+    ToolCallFailed { tool: String, details: String },
+
     #[error("Model returned an error: {details}")]
     CompletionFailed { details: String },
 
@@ -357,6 +366,25 @@ mod tests {
             err.to_string(),
             "API key required for openai. Set OPENAI_API_KEY environment variable."
         );
+    }
+
+    #[test]
+    fn error_max_turns_exceeded_message() {
+        let err = MvError::MaxTurnsExceeded { turns: 10 };
+        assert_eq!(
+            err.to_string(),
+            "Model hit the agentic turn limit (10 turns) without a final answer. \
+             Try a simpler prompt, or --no-tools if tools are not needed."
+        );
+    }
+
+    #[test]
+    fn error_tool_call_failed_message() {
+        let err = MvError::ToolCallFailed {
+            tool: "file_list".to_string(),
+            details: "no such tool".to_string(),
+        };
+        assert_eq!(err.to_string(), "tool 'file_list' failed: no such tool");
     }
 
     #[test]

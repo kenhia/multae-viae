@@ -64,6 +64,26 @@ fn unknown_model_error_message() {
         .stderr(predicate::str::contains("not found in registry"));
 }
 
+// --- 008/F10: --json errors go to stderr, not stdout ---
+
+#[test]
+fn json_error_goes_to_stderr_not_stdout() {
+    cmd()
+        .args([
+            "--json",
+            "prompt",
+            "-c",
+            "/nonexistent/models.yaml",
+            "Hello",
+        ])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains(r#"{"error""#))
+        .stderr(predicate::str::contains("Failed to parse config"))
+        .stdout(predicate::str::is_empty());
+}
+
 // --- US2: OTLP flag tests ---
 
 #[test]

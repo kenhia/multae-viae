@@ -231,6 +231,10 @@ fn step_type_name(step: &Step) -> &'static str {
     }
 }
 
+/// Upper bound on a single retry backoff sleep — exponential growth past this
+/// would stall a workflow for minutes.
+const MAX_RETRY_DELAY_MS: u64 = 30_000;
+
 async fn execute_tool_with_error_handling<T: ToolExecutor>(
     ts: &super::types::ToolStep,
     rendered_inputs: &HashMap<String, serde_json::Value>,
@@ -258,6 +262,15 @@ async fn execute_tool_with_error_handling<T: ToolExecutor>(
         ErrorAction::Retry => {
             let retry = ts.retry.as_ref();
             let max_attempts = retry.map_or(3, |r| r.max_attempts);
+            // Defense in depth: validation rejects max_attempts == 0, but the
+            // engine is a library API callable without prior validation — a
+            // zero here must be an error, never a panic.
+            if max_attempts == 0 {
+                return Err(MvError::WorkflowStepFailed {
+                    step: ts.id.clone(),
+                    details: "invalid retry config: max_attempts must be at least 1".to_string(),
+                });
+            }
             let is_exponential =
                 retry.is_none_or(|r| r.backoff == super::types::BackoffStrategy::Exponential);
 
@@ -275,7 +288,9 @@ async fn execute_tool_with_error_handling<T: ToolExecutor>(
                             });
                         }
                         let delay_ms = if is_exponential {
-                            100 * 2u64.pow(attempt - 1)
+                            100u64
+                                .saturating_mul(2u64.saturating_pow(attempt - 1))
+                                .min(MAX_RETRY_DELAY_MS)
                         } else {
                             100
                         };
@@ -290,7 +305,11 @@ async fn execute_tool_with_error_handling<T: ToolExecutor>(
                     }
                 }
             }
-            unreachable!()
+            // The loop always returns on the final attempt (max_attempts >= 1).
+            Err(MvError::WorkflowStepFailed {
+                step: ts.id.clone(),
+                details: "retry loop ended without a result".to_string(),
+            })
         }
     }
 }
@@ -546,6 +565,42 @@ mod tests {
         let vars = ctx.to_template_context();
         assert_eq!(vars["input_key"], "input_val");
         assert_eq!(vars["output_key"], "output_val");
+    }
+
+    // --- 008/F4: invalid retry config must error, never panic ---
+
+    #[tokio::test]
+    async fn retry_zero_attempts_errors_instead_of_panicking() {
+        let yaml = r#"
+name: test
+version: "1.0"
+steps:
+  - id: t1
+    type: tool
+    output: out
+    tool: some_tool
+    on_error: retry
+    retry:
+      max_attempts: 0
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let prompt_exec = MockPromptExecutor::new(vec![]);
+        let tool_exec = MockToolExecutor::always_ok("never reached");
+
+        let result = execute_workflow(
+            &wf,
+            HashMap::new(),
+            &prompt_exec,
+            &tool_exec,
+            Path::new("."),
+        )
+        .await;
+
+        let err = result.expect_err("max_attempts: 0 must be an error");
+        assert!(
+            err.to_string().contains("max_attempts must be at least 1"),
+            "got: {err}"
+        );
     }
 
     // --- T013: Sequential engine execution tests ---
