@@ -281,6 +281,115 @@ outputs:
     );
 }
 
+// --- 009/WS3 (T014): branch workflow end-to-end through the CLI ---
+
+/// Run the branch workflow with a given `style`; returns the chat request
+/// bodies the proxy saw (one per executed prompt step).
+fn run_branch_workflow(style: &str) -> Vec<serde_json::Value> {
+    let s = setup();
+    s.proxy.mount_health_ok();
+    s.proxy.mount_chat_text("ANALYSIS-TEXT");
+
+    let wf_path = s.dir.path().join("branch.yaml");
+    std::fs::write(
+        &wf_path,
+        format!(
+            r#"
+name: branch-e2e
+version: "1.0"
+defaults:
+  model: {MODEL_ID}
+inputs:
+  - name: topic
+    type: string
+    required: true
+  - name: style
+    type: string
+    required: true
+steps:
+  - id: route
+    type: branch
+    condition: "style == 'detailed'"
+    then:
+      - id: deep
+        type: prompt
+        output: analysis
+        template: "THOROUGH analysis of {{{{topic}}}}"
+    else:
+      - id: quick
+        type: prompt
+        output: analysis
+        template: "ONE-SENTENCE summary of {{{{topic}}}}"
+  - id: format
+    type: prompt
+    output: formatted
+    template: "Format: {{{{analysis}}}}"
+outputs:
+  - name: result
+    from: format
+"#
+        ),
+    )
+    .unwrap();
+
+    cmd()
+        .current_dir(s.dir.path())
+        .args([
+            "workflow",
+            "run",
+            wf_path.to_str().unwrap(),
+            "--config",
+            s.config.to_str().unwrap(),
+            "--input",
+            "topic=ownership",
+            "--input",
+            &format!("style={style}"),
+        ])
+        .assert()
+        .success();
+
+    s.proxy.chat_request_bodies()
+}
+
+#[test]
+fn branch_workflow_takes_then_arm() {
+    let bodies = run_branch_workflow("detailed");
+    // Exactly two prompt steps ran: the `then` arm + the format step.
+    assert_eq!(
+        bodies.len(),
+        2,
+        "expected then-arm + format, got {}",
+        bodies.len()
+    );
+    let first = serde_json::to_string(&bodies[0]).unwrap();
+    assert!(first.contains("THOROUGH"), "then arm should run: {first}");
+    assert!(
+        !first.contains("ONE-SENTENCE"),
+        "else arm must be skipped: {first}"
+    );
+    // The branch output flowed into the format step.
+    let second = serde_json::to_string(&bodies[1]).unwrap();
+    assert!(
+        second.contains("Format: ANALYSIS-TEXT"),
+        "branch output must reach the format step: {second}"
+    );
+}
+
+#[test]
+fn branch_workflow_takes_else_arm() {
+    let bodies = run_branch_workflow("brief");
+    assert_eq!(bodies.len(), 2);
+    let first = serde_json::to_string(&bodies[0]).unwrap();
+    assert!(
+        first.contains("ONE-SENTENCE"),
+        "else arm should run: {first}"
+    );
+    assert!(
+        !first.contains("THOROUGH"),
+        "then arm must be skipped: {first}"
+    );
+}
+
 // --- T029: end-to-end 3-step workflow (tool → prompt → transform) ---
 
 #[test]

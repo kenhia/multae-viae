@@ -41,6 +41,14 @@ pub enum ValidationError {
         step_id: String,
         details: String,
     },
+    EmptyBranchArm {
+        step_id: String,
+        arm: &'static str,
+    },
+    ConditionSyntax {
+        step_id: String,
+        details: String,
+    },
 }
 
 impl std::fmt::Display for ValidationError {
@@ -92,6 +100,15 @@ impl std::fmt::Display for ValidationError {
             Self::TemplateFileError { step_id, details } => {
                 write!(f, "step '{step_id}': {details}")
             }
+            Self::EmptyBranchArm { step_id, arm } => {
+                write!(f, "branch step '{step_id}' has an empty '{arm}' arm")
+            }
+            Self::ConditionSyntax { step_id, details } => {
+                write!(
+                    f,
+                    "branch step '{step_id}' condition syntax error: {details}"
+                )
+            }
         }
     }
 }
@@ -114,123 +131,28 @@ pub fn validate(workflow: &Workflow, workflow_dir: Option<&Path>) -> Vec<Validat
 
     let input_names: HashSet<String> = workflow.inputs.iter().map(|i| i.name.clone()).collect();
 
-    // Check duplicate step IDs and duplicate output names
-    let mut seen_ids = HashSet::new();
-    let mut seen_outputs: HashSet<&str> = HashSet::new();
-    for step in &workflow.steps {
-        if !seen_ids.insert(step.id()) {
-            errors.push(ValidationError::DuplicateStepId(step.id().to_string()));
-        }
-        if !seen_outputs.insert(step.output()) {
-            errors.push(ValidationError::DuplicateOutputName {
-                output_name: step.output().to_string(),
-                step_id: step.id().to_string(),
-            });
-        }
-        // Shadowing an input is legal (outputs win) but easy to do by
-        // accident — surface it without failing validation.
-        if input_names.contains(step.output()) {
-            tracing::warn!(
-                step_id = %step.id(),
-                output = %step.output(),
-                "step output shadows a workflow input of the same name"
-            );
+    // Duplicate step IDs across the whole tree (branch arms included).
+    let mut all_ids: Vec<&str> = Vec::new();
+    collect_step_ids(&workflow.steps, &mut all_ids);
+    let mut seen_ids: HashSet<&str> = HashSet::new();
+    for id in &all_ids {
+        if !seen_ids.insert(id) {
+            errors.push(ValidationError::DuplicateStepId(id.to_string()));
         }
     }
 
-    // Per-step checks
-    let mut prior_outputs: HashSet<String> = HashSet::new();
-    for step in &workflow.steps {
-        match step {
-            Step::Prompt(ps) => {
-                // Check template presence
-                match (&ps.template, &ps.template_file) {
-                    (None, None) => {
-                        errors.push(ValidationError::MissingTemplate(ps.id.clone()));
-                    }
-                    (Some(_), Some(_)) => {
-                        errors.push(ValidationError::BothTemplates(ps.id.clone()));
-                    }
-                    _ => {}
-                }
+    // Per-step reference/template/output checks, recursing through branch arms
+    // with maybe-defined semantics (see `validate_steps`).
+    let outer = HashSet::new();
+    validate_steps(
+        &workflow.steps,
+        &outer,
+        &input_names,
+        workflow_dir,
+        &mut errors,
+    );
 
-                if let Some(ref tmpl) = ps.template {
-                    check_template(
-                        &ps.id,
-                        tmpl,
-                        Some(&ps.output),
-                        &prior_outputs,
-                        &input_names,
-                        &mut errors,
-                    );
-                } else if let Some(ref file) = ps.template_file
-                    && let Some(dir) = workflow_dir
-                {
-                    // Validate file-based templates too — `workflow validate`
-                    // must not give false confidence for template_file steps.
-                    match template::load_template_file(file, dir) {
-                        Ok(contents) => check_template(
-                            &ps.id,
-                            &contents,
-                            Some(&ps.output),
-                            &prior_outputs,
-                            &input_names,
-                            &mut errors,
-                        ),
-                        Err(e) => errors.push(ValidationError::TemplateFileError {
-                            step_id: ps.id.clone(),
-                            details: e.to_string(),
-                        }),
-                    }
-                }
-            }
-            Step::Tool(ts) => {
-                // Retry config: zero attempts would mean "never execute".
-                if let Some(retry) = &ts.retry
-                    && retry.max_attempts == 0
-                {
-                    errors.push(ValidationError::InvalidRetryConfig {
-                        step_id: ts.id.clone(),
-                        details: "max_attempts must be at least 1".to_string(),
-                    });
-                }
-
-                // Check template references in every string leaf, nested
-                // values included (the engine renders them the same way).
-                for val in ts.inputs.values() {
-                    check_json_value_templates(
-                        &ts.id,
-                        val,
-                        &prior_outputs,
-                        &input_names,
-                        &mut errors,
-                    );
-                }
-            }
-            Step::Transform(ts) => {
-                // Check unknown transform operations
-                if !KNOWN_TRANSFORMS.contains(&ts.operation.as_str()) {
-                    errors.push(ValidationError::UnknownTransformOp {
-                        step_id: ts.id.clone(),
-                        operation: ts.operation.clone(),
-                    });
-                }
-
-                check_template(
-                    &ts.id,
-                    &ts.input,
-                    None,
-                    &prior_outputs,
-                    &input_names,
-                    &mut errors,
-                );
-            }
-        }
-
-        prior_outputs.insert(step.output().to_string());
-    }
-
-    // Check workflow outputs reference existing steps
+    // Check workflow outputs reference existing steps (top-level or nested).
     for output in &workflow.outputs {
         if !seen_ids.contains(output.from.as_str()) {
             errors.push(ValidationError::MissingStepOutput {
@@ -241,6 +163,194 @@ pub fn validate(workflow: &Workflow, workflow_dir: Option<&Path>) -> Vec<Validat
     }
 
     errors
+}
+
+/// Collect every step id in declaration order, descending into branch arms.
+fn collect_step_ids<'a>(steps: &'a [Step], out: &mut Vec<&'a str>) {
+    for step in steps {
+        out.push(step.id());
+        if let Step::Branch(bs) = step {
+            collect_step_ids(&bs.then, out);
+            collect_step_ids(&bs.otherwise, out);
+        }
+    }
+}
+
+/// Validate a linear step sequence. `outer` is the set of output names
+/// definitely available from the enclosing scope (before this sequence).
+/// Returns the set of names this sequence *definitely* defines — for a branch,
+/// that is the intersection of what its two arms define, which is how an output
+/// becomes safe to reference after the branch (maybe-defined → reference error).
+fn validate_steps(
+    steps: &[Step],
+    outer: &HashSet<String>,
+    input_names: &HashSet<String>,
+    workflow_dir: Option<&Path>,
+    errors: &mut Vec<ValidationError>,
+) -> HashSet<String> {
+    // `available` = outer scope ∪ names defined so far in this sequence.
+    let mut available: HashSet<String> = outer.clone();
+    // Names defined in THIS scope: for in-scope duplicate detection and the
+    // arm-intersection the caller uses.
+    let mut defined_here: HashSet<String> = HashSet::new();
+
+    for step in steps {
+        match step {
+            Step::Prompt(ps) => {
+                match (&ps.template, &ps.template_file) {
+                    (None, None) => errors.push(ValidationError::MissingTemplate(ps.id.clone())),
+                    (Some(_), Some(_)) => {
+                        errors.push(ValidationError::BothTemplates(ps.id.clone()))
+                    }
+                    _ => {}
+                }
+
+                if let Some(ref tmpl) = ps.template {
+                    check_template(
+                        &ps.id,
+                        tmpl,
+                        Some(&ps.output),
+                        &available,
+                        input_names,
+                        errors,
+                    );
+                } else if let Some(ref file) = ps.template_file
+                    && let Some(dir) = workflow_dir
+                {
+                    match template::load_template_file(file, dir) {
+                        Ok(contents) => check_template(
+                            &ps.id,
+                            &contents,
+                            Some(&ps.output),
+                            &available,
+                            input_names,
+                            errors,
+                        ),
+                        Err(e) => errors.push(ValidationError::TemplateFileError {
+                            step_id: ps.id.clone(),
+                            details: e.to_string(),
+                        }),
+                    }
+                }
+                register_output(
+                    &ps.id,
+                    &ps.output,
+                    input_names,
+                    &mut available,
+                    &mut defined_here,
+                    errors,
+                );
+            }
+            Step::Tool(ts) => {
+                if let Some(retry) = &ts.retry
+                    && retry.max_attempts == 0
+                {
+                    errors.push(ValidationError::InvalidRetryConfig {
+                        step_id: ts.id.clone(),
+                        details: "max_attempts must be at least 1".to_string(),
+                    });
+                }
+                for val in ts.inputs.values() {
+                    check_json_value_templates(&ts.id, val, &available, input_names, errors);
+                }
+                register_output(
+                    &ts.id,
+                    &ts.output,
+                    input_names,
+                    &mut available,
+                    &mut defined_here,
+                    errors,
+                );
+            }
+            Step::Transform(ts) => {
+                if !KNOWN_TRANSFORMS.contains(&ts.operation.as_str()) {
+                    errors.push(ValidationError::UnknownTransformOp {
+                        step_id: ts.id.clone(),
+                        operation: ts.operation.clone(),
+                    });
+                }
+                check_template(&ts.id, &ts.input, None, &available, input_names, errors);
+                register_output(
+                    &ts.id,
+                    &ts.output,
+                    input_names,
+                    &mut available,
+                    &mut defined_here,
+                    errors,
+                );
+            }
+            Step::Branch(bs) => {
+                // Condition references must already be available; a malformed
+                // condition is a syntax error.
+                match template::condition_references(&bs.condition) {
+                    Ok(refs) => {
+                        for var in refs {
+                            if !available.contains(&var) && !input_names.contains(&var) {
+                                errors.push(ValidationError::UnresolvableReference {
+                                    step_id: bs.id.clone(),
+                                    reference: var,
+                                });
+                            }
+                        }
+                    }
+                    Err(details) => errors.push(ValidationError::ConditionSyntax {
+                        step_id: bs.id.clone(),
+                        details,
+                    }),
+                }
+
+                if bs.then.is_empty() {
+                    errors.push(ValidationError::EmptyBranchArm {
+                        step_id: bs.id.clone(),
+                        arm: "then",
+                    });
+                }
+
+                // Each arm validates against the context available at the fork.
+                let then_def =
+                    validate_steps(&bs.then, &available, input_names, workflow_dir, errors);
+                let else_def =
+                    validate_steps(&bs.otherwise, &available, input_names, workflow_dir, errors);
+
+                // Only outputs defined in BOTH arms are definitely available
+                // afterwards. (An empty `else` defines nothing, so a branch with
+                // no `else` makes none of its outputs unconditionally available.)
+                for name in then_def.intersection(&else_def) {
+                    available.insert(name.clone());
+                    defined_here.insert(name.clone());
+                }
+            }
+        }
+    }
+
+    defined_here
+}
+
+/// Register a leaf step's output: flag an in-scope duplicate (a later step
+/// would silently overwrite it), warn on input shadowing, and add it to the
+/// available/defined sets.
+fn register_output(
+    step_id: &str,
+    output: &str,
+    input_names: &HashSet<String>,
+    available: &mut HashSet<String>,
+    defined_here: &mut HashSet<String>,
+    errors: &mut Vec<ValidationError>,
+) {
+    if !defined_here.insert(output.to_string()) {
+        errors.push(ValidationError::DuplicateOutputName {
+            output_name: output.to_string(),
+            step_id: step_id.to_string(),
+        });
+    }
+    available.insert(output.to_string());
+    if input_names.contains(output) {
+        tracing::warn!(
+            step_id = %step_id,
+            output = %output,
+            "step output shadows a workflow input of the same name"
+        );
+    }
 }
 
 /// Parse a template with the real engine and verify every referenced
@@ -666,6 +776,340 @@ steps:
 "#;
         let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
         assert!(validate(&wf, None).is_empty());
+    }
+
+    // --- 009/WS3: branch validation ---
+
+    #[test]
+    fn branch_both_arms_define_output_is_valid() {
+        // The recommended pattern: both arms define `answer`, so it is
+        // definitely available afterwards.
+        let yaml = r#"
+name: test
+version: "1.0"
+inputs:
+  - name: topic
+    type: string
+  - name: style
+    type: string
+steps:
+  - id: route
+    type: branch
+    condition: "style == 'detailed'"
+    then:
+      - id: deep
+        type: prompt
+        output: answer
+        template: "Deep {{topic}}"
+    else:
+      - id: quick
+        type: prompt
+        output: answer
+        template: "Quick {{topic}}"
+  - id: use
+    type: prompt
+    output: final
+    template: "Use {{answer}}"
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        assert!(validate(&wf, None).is_empty(), "{:?}", validate(&wf, None));
+    }
+
+    #[test]
+    fn branch_output_defined_in_one_arm_is_maybe_undefined() {
+        // `answer` is only defined in `then`; referencing it after the branch
+        // must be a reference error (the else arm would leave it undefined).
+        let yaml = r#"
+name: test
+version: "1.0"
+inputs:
+  - name: topic
+    type: string
+  - name: style
+    type: string
+steps:
+  - id: route
+    type: branch
+    condition: "style == 'detailed'"
+    then:
+      - id: deep
+        type: prompt
+        output: answer
+        template: "Deep {{topic}}"
+  - id: use
+    type: prompt
+    output: final
+    template: "Use {{answer}}"
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let errors = validate(&wf, None);
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::UnresolvableReference { step_id, reference }
+                    if step_id == "use" && reference == "answer"
+            )),
+            "expected maybe-undefined reference error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn branch_arm_can_reference_prior_output() {
+        // Outputs defined before the branch are available inside the arms.
+        let yaml = r#"
+name: test
+version: "1.0"
+steps:
+  - id: setup
+    type: prompt
+    output: base
+    template: "base"
+  - id: route
+    type: branch
+    condition: "base"
+    then:
+      - id: deep
+        type: prompt
+        output: answer
+        template: "Use {{base}}"
+    else:
+      - id: quick
+        type: prompt
+        output: answer
+        template: "Also {{base}}"
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        assert!(validate(&wf, None).is_empty(), "{:?}", validate(&wf, None));
+    }
+
+    #[test]
+    fn branch_arm_cannot_reference_sibling_arm_output() {
+        // `then` defines `a`; `else` referencing `a` must fail — arms are
+        // mutually exclusive, so `a` is not available in the else arm.
+        let yaml = r#"
+name: test
+version: "1.0"
+steps:
+  - id: route
+    type: branch
+    condition: "flag"
+    then:
+      - id: t
+        type: prompt
+        output: a
+        template: "hello"
+    else:
+      - id: e
+        type: prompt
+        output: b
+        template: "Use {{a}}"
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let errors = validate(&wf, None);
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::UnresolvableReference { reference, .. } if reference == "a"
+            )),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn branch_unknown_condition_variable_rejected() {
+        let yaml = r#"
+name: test
+version: "1.0"
+steps:
+  - id: route
+    type: branch
+    condition: "missing_flag == 'x'"
+    then:
+      - id: t
+        type: prompt
+        output: out
+        template: "hi"
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let errors = validate(&wf, None);
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::UnresolvableReference { step_id, reference }
+                    if step_id == "route" && reference == "missing_flag"
+            )),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn branch_malformed_condition_is_syntax_error() {
+        let yaml = r#"
+name: test
+version: "1.0"
+steps:
+  - id: route
+    type: branch
+    condition: "=="
+    then:
+      - id: t
+        type: prompt
+        output: out
+        template: "hi"
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let errors = validate(&wf, None);
+        assert!(
+            errors.iter().any(
+                |e| matches!(e, ValidationError::ConditionSyntax { step_id, .. } if step_id == "route")
+            ),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn branch_empty_then_arm_rejected() {
+        let yaml = r#"
+name: test
+version: "1.0"
+steps:
+  - id: route
+    type: branch
+    condition: "flag"
+    then: []
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let errors = validate(&wf, None);
+        assert!(
+            errors.iter().any(
+                |e| matches!(e, ValidationError::EmptyBranchArm { step_id, arm } if step_id == "route" && *arm == "then")
+            ),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn branch_duplicate_step_id_across_arms_rejected() {
+        // The same id in both arms is a duplicate (ids are workflow-global).
+        let yaml = r#"
+name: test
+version: "1.0"
+steps:
+  - id: route
+    type: branch
+    condition: "flag"
+    then:
+      - id: dup
+        type: prompt
+        output: a
+        template: "hi"
+    else:
+      - id: dup
+        type: prompt
+        output: b
+        template: "bye"
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let errors = validate(&wf, None);
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::DuplicateStepId(id) if id == "dup")),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn nested_branch_maybe_defined_propagates() {
+        // `answer` is defined in both inner arms (so definitely defined after
+        // the inner branch) AND in the outer else — so it is available after
+        // the outer branch and the final step validates clean.
+        let yaml = r#"
+name: test
+version: "1.0"
+inputs:
+  - name: a
+    type: string
+  - name: b
+    type: string
+steps:
+  - id: outer
+    type: branch
+    condition: "a"
+    then:
+      - id: inner
+        type: branch
+        condition: "b"
+        then:
+          - id: t1
+            type: prompt
+            output: answer
+            template: "t1"
+        else:
+          - id: t2
+            type: prompt
+            output: answer
+            template: "t2"
+    else:
+      - id: e1
+        type: prompt
+        output: answer
+        template: "e1"
+  - id: use
+    type: prompt
+    output: final
+    template: "Use {{answer}}"
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        assert!(validate(&wf, None).is_empty(), "{:?}", validate(&wf, None));
+    }
+
+    #[test]
+    fn nested_branch_maybe_defined_in_inner_one_arm_fails() {
+        // Inner branch defines `answer` only in its `then`; the outer else also
+        // defines it. After the inner branch `answer` is maybe-undefined, so the
+        // outer `then` does not definitely define it → reference after outer fails.
+        let yaml = r#"
+name: test
+version: "1.0"
+inputs:
+  - name: a
+    type: string
+  - name: b
+    type: string
+steps:
+  - id: outer
+    type: branch
+    condition: "a"
+    then:
+      - id: inner
+        type: branch
+        condition: "b"
+        then:
+          - id: t1
+            type: prompt
+            output: answer
+            template: "t1"
+    else:
+      - id: e1
+        type: prompt
+        output: answer
+        template: "e1"
+  - id: use
+    type: prompt
+    output: final
+    template: "Use {{answer}}"
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let errors = validate(&wf, None);
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::UnresolvableReference { step_id, reference }
+                    if step_id == "use" && reference == "answer"
+            )),
+            "got: {errors:?}"
+        );
     }
 
     #[test]

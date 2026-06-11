@@ -90,21 +90,38 @@ never do; `just ci` green.
 
 ## Phase 3: WS3 — `branch` step
 
-- [ ] T011 [WS3] Recursive `Step::Branch { condition, then, else }` in
-  `crates/mv-core/src/workflow/types.rs` + parser; arms are non-empty
-  `Vec<Step>`; `deny_unknown_fields`; parse/shape tests (FR-007)
-- [ ] T012 [WS3] Validation (`crates/mv-core/src/workflow/validate.rs`):
+- [X] T011 [WS3] Recursive `Step::Branch { condition, then, else }` in
+  `crates/mv-core/src/workflow/types.rs` + parser; `deny_unknown_fields`;
+  parse/shape tests (FR-007). *`else` renamed to the `otherwise` field
+  (`else` is a Rust keyword), `#[serde(rename = "else")]`. `Step::output()`
+  changed from `&str` to `Option<&str>` — a branch produces no single output;
+  all callers (engine, validate) updated. Non-empty-arm enforcement moved to
+  validation (T012, `EmptyBranchArm`) since serde can't express it.*
+- [X] T012 [WS3] Validation (`crates/mv-core/src/workflow/validate.rs`):
   condition compiles via minijinja `compile_expression`; recursive walk
   extends duplicate-output detection into arms; **maybe-defined analysis** —
   post-branch reference to an output not defined in *every* arm (missing
   `else` = empty arm) is an error; tests incl. nested branches (FR-008,
-  SC-004)
-- [ ] T013 [WS3] Engine (`crates/mv-core/src/workflow/engine.rs`): evaluate
+  SC-004). *Implemented as a set-algebra walk: `validate_steps` returns the
+  names a sequence definitely defines; a branch contributes the
+  intersection of its two arms. Scope-aware duplicate-output detection
+  (same name in `then` and `else` is the recommended pattern, not a
+  duplicate). New errors: `EmptyBranchArm`, `ConditionSyntax`.
+  `condition_references`/`evaluate_condition` added to `template.rs` via
+  `Expression::undeclared_variables` / `compile_expression`.*
+- [X] T013 [WS3] Engine (`crates/mv-core/src/workflow/engine.rs`): evaluate
   condition against the context (minijinja truthiness), recurse into the
   chosen arm via `execute_steps`, skip cleanly when falsy with no `else`;
-  tracing span per branch; mock-executor tests (FR-007)
-- [ ] T014 [WS3] Example workflow `workflows/examples/branch-example.yaml` +
-  e2e CLI test against the fake proxy (FR-011, SC-003)
+  tracing span per branch; mock-executor tests (FR-007). *`execute_step` now
+  takes `&mut ctx` and records its own leaf output (branch produces none);
+  the arm recursion is `Box::pin(execute_steps(...))`. `build_workflow_outputs`
+  gained a recursive `find_step_by_id` so `outputs: from:` can map a step
+  nested in an arm.*
+- [X] T014 [WS3] Example workflow `workflows/examples/branch-example.yaml` +
+  e2e CLI test against the fake proxy (FR-011, SC-003). *Two e2e tests prove
+  then/else arm selection and that the branch output flows to the
+  post-branch step; a `cli_workflow` test validates the shipped example so it
+  can't rot.*
 
 **Checkpoint**: workflows branch on intermediate results; validator sees
 through arms.

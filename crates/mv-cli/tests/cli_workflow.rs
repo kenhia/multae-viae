@@ -112,6 +112,23 @@ steps:
         .stderr(predicate::str::contains("duplicate step id"));
 }
 
+// --- 009/WS3: the shipped branch example must validate ---
+
+#[test]
+fn shipped_branch_example_validates() {
+    // Guards the example against rot — `workflow validate` runs the full
+    // recursive branch validation (maybe-defined, condition syntax, …).
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../workflows/examples/branch-example.yaml"
+    );
+    cmd()
+        .args(["workflow", "validate", path])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("valid"));
+}
+
 // --- 008/F2: workflow tool steps execute real built-in tools ---
 
 #[test]

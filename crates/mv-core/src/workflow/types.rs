@@ -57,6 +57,9 @@ pub enum InputType {
 }
 
 /// A single unit of work within a workflow, discriminated by `type`.
+///
+/// `Branch` is a control-flow step: it owns nested arm step-lists rather than
+/// producing a single output, which is why [`Step::output`] returns `Option`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum Step {
@@ -66,6 +69,8 @@ pub enum Step {
     Tool(ToolStep),
     #[serde(rename = "transform")]
     Transform(TransformStep),
+    #[serde(rename = "branch")]
+    Branch(BranchStep),
 }
 
 impl Step {
@@ -74,14 +79,18 @@ impl Step {
             Step::Prompt(s) => &s.id,
             Step::Tool(s) => &s.id,
             Step::Transform(s) => &s.id,
+            Step::Branch(s) => &s.id,
         }
     }
 
-    pub fn output(&self) -> &str {
+    /// The single output name a leaf step produces, or `None` for control-flow
+    /// steps (`branch`) whose outputs come from their nested arm steps.
+    pub fn output(&self) -> Option<&str> {
         match self {
-            Step::Prompt(s) => &s.output,
-            Step::Tool(s) => &s.output,
-            Step::Transform(s) => &s.output,
+            Step::Prompt(s) => Some(&s.output),
+            Step::Tool(s) => Some(&s.output),
+            Step::Transform(s) => Some(&s.output),
+            Step::Branch(_) => None,
         }
     }
 
@@ -90,6 +99,7 @@ impl Step {
             Step::Prompt(s) => s.name.as_deref(),
             Step::Tool(s) => s.name.as_deref(),
             Step::Transform(s) => s.name.as_deref(),
+            Step::Branch(s) => s.name.as_deref(),
         }
     }
 }
@@ -143,6 +153,24 @@ pub struct TransformStep {
     pub input: String,
     #[serde(default)]
     pub schema: Option<serde_json::Value>,
+}
+
+/// A branch step — runs one of two nested step-lists based on a condition.
+///
+/// The `condition` is a minijinja expression (the same template language as
+/// `{{…}}`, e.g. `style == 'detailed'`) evaluated against the execution
+/// context. `then` runs when it is truthy; the optional `else` runs otherwise.
+/// Arms may nest further branch steps.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BranchStep {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub condition: String,
+    pub then: Vec<Step>,
+    #[serde(default, rename = "else")]
+    pub otherwise: Vec<Step>,
 }
 
 /// Error handling strategy for tool steps.

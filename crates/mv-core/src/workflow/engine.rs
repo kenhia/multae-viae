@@ -178,9 +178,8 @@ pub async fn execute_workflow<P: PromptExecutor, T: ToolExecutor>(
     })
 }
 
-/// Run a step list against a mutable context. Extracted from
-/// `execute_workflow` so future nested step types (`branch`, `workflow`)
-/// can recurse into a sub-list (via `Box::pin`).
+/// Run a step list against a mutable context. Recurses into nested step lists
+/// (the `branch` arms) via `Box::pin` for the async recursion.
 async fn execute_steps<P: PromptExecutor, T: ToolExecutor>(
     steps: &[Step],
     ctx: &mut ExecutionContext,
@@ -194,14 +193,14 @@ async fn execute_steps<P: PromptExecutor, T: ToolExecutor>(
             "workflow_step",
             step.id = %step.id(),
             step.type = %step_type_name(step),
-            step.output = %step.output(),
+            step.output = step.output().unwrap_or(""),
         );
         let _enter = step_span.enter();
         let start = std::time::Instant::now();
 
         debug!(step_id = %step.id(), step_type = %step_type_name(step), "executing step");
 
-        let output = execute_step(
+        execute_step(
             step,
             ctx,
             defaults,
@@ -213,25 +212,24 @@ async fn execute_steps<P: PromptExecutor, T: ToolExecutor>(
 
         info!(
             step_id = %step.id(),
-            output_name = %step.output(),
-            output_len = output.len(),
             duration_ms = start.elapsed().as_millis() as u64,
             "step completed"
         );
-        ctx.insert_output(step.output(), output);
     }
     Ok(())
 }
 
-/// Execute a single step against an immutable view of the context.
+/// Execute a single step, recording any leaf output into the context. Control
+/// steps (`branch`) mutate the context by recursing into the chosen arm rather
+/// than producing a single output.
 async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
     step: &Step,
-    ctx: &ExecutionContext,
+    ctx: &mut ExecutionContext,
     defaults: &StepDefaults,
     prompt_executor: &P,
     tool_executor: &T,
     workflow_dir: &Path,
-) -> Result<String, MvError> {
+) -> Result<(), MvError> {
     match step {
         Step::Prompt(ps) => {
             let model = ps.model.as_deref().unwrap_or(&defaults.model);
@@ -263,13 +261,14 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
                 }
             })?;
 
-            prompt_executor
+            let output = prompt_executor
                 .execute_prompt(&rendered, model, temp, max_tok)
                 .await
                 .map_err(|e| MvError::WorkflowStepError {
                     step: ps.id.clone(),
                     source: Box::new(e),
-                })
+                })?;
+            ctx.insert_output(&ps.output, output);
         }
         Step::Tool(ts) => {
             // Render tool inputs from context — every string leaf, including
@@ -280,7 +279,9 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
                 rendered_inputs.insert(key.clone(), render_json_value(val, &vars, &ts.id)?);
             }
 
-            execute_tool_with_error_handling(ts, &rendered_inputs, tool_executor).await
+            let output =
+                execute_tool_with_error_handling(ts, &rendered_inputs, tool_executor).await?;
+            ctx.insert_output(&ts.output, output);
         }
         Step::Transform(ts) => {
             let vars = ctx.to_template_context();
@@ -291,9 +292,34 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
                 }
             })?;
 
-            execute_transform(&ts.id, &ts.operation, &input_value, ts.schema.as_ref())
+            let output =
+                execute_transform(&ts.id, &ts.operation, &input_value, ts.schema.as_ref())?;
+            ctx.insert_output(&ts.output, output);
+        }
+        Step::Branch(bs) => {
+            // Evaluate the condition against the current context, then run the
+            // chosen arm — its steps write their outputs into `ctx` directly.
+            let vars = ctx.to_template_context();
+            let take_then = template::evaluate_condition(&bs.condition, &vars).map_err(|e| {
+                MvError::WorkflowTemplateError {
+                    step: bs.id.clone(),
+                    details: e,
+                }
+            })?;
+            debug!(step_id = %bs.id, take_then, "branch condition evaluated");
+            let arm = if take_then { &bs.then } else { &bs.otherwise };
+            Box::pin(execute_steps(
+                arm,
+                ctx,
+                defaults,
+                prompt_executor,
+                tool_executor,
+                workflow_dir,
+            ))
+            .await?;
         }
     }
+    Ok(())
 }
 
 /// Render every string leaf of a JSON value through the template engine —
@@ -333,29 +359,48 @@ fn step_type_name(step: &Step) -> &'static str {
         Step::Prompt(_) => "prompt",
         Step::Tool(_) => "tool",
         Step::Transform(_) => "transform",
+        Step::Branch(_) => "branch",
     }
+}
+
+/// Find a step by id, descending into branch arms — workflow `outputs` may map
+/// `from:` to a step nested inside a branch.
+fn find_step_by_id<'a>(steps: &'a [Step], id: &str) -> Option<&'a Step> {
+    for step in steps {
+        if step.id() == id {
+            return Some(step);
+        }
+        if let Step::Branch(bs) = step {
+            if let Some(found) = find_step_by_id(&bs.then, id) {
+                return Some(found);
+            }
+            if let Some(found) = find_step_by_id(&bs.otherwise, id) {
+                return Some(found);
+            }
+        }
+    }
+    None
 }
 
 fn build_workflow_outputs(workflow: &Workflow, ctx: &ExecutionContext) -> HashMap<String, String> {
     if workflow.outputs.is_empty() {
-        // When no outputs specified, return last step's output
-        if let Some(last_step) = workflow.steps.last() {
-            let mut map = HashMap::new();
-            if let Some(output) = ctx.output(last_step.output()) {
-                map.insert(last_step.output().to_string(), output.to_string());
-            }
-            map
-        } else {
-            HashMap::new()
+        // When no outputs specified, return the last step's output (if it is a
+        // leaf step that produced one — a trailing branch has no single output).
+        let mut map = HashMap::new();
+        if let Some(output_name) = workflow.steps.last().and_then(|s| s.output())
+            && let Some(value) = ctx.output(output_name)
+        {
+            map.insert(output_name.to_string(), value.to_string());
         }
+        map
     } else {
         workflow
             .outputs
             .iter()
             .filter_map(|wo| {
-                // wo.from is a step ID — find that step's output name
-                let step = workflow.steps.iter().find(|s| s.id() == wo.from)?;
-                let output_name = step.output();
+                // wo.from is a step ID — find that step's output name.
+                let step = find_step_by_id(&workflow.steps, &wo.from)?;
+                let output_name = step.output()?;
                 ctx.output(output_name)
                     .map(|v| (wo.name.clone(), v.to_string()))
             })
@@ -1092,6 +1137,246 @@ steps:
             }
             other => panic!("expected WorkflowStepFailed, got: {other}"),
         }
+    }
+
+    // --- 009/WS3: branch execution ---
+
+    #[tokio::test]
+    async fn branch_runs_then_arm_when_condition_true() {
+        let yaml = r#"
+name: branch-then
+version: "1.0"
+inputs:
+  - name: style
+    type: string
+    required: true
+steps:
+  - id: route
+    type: branch
+    condition: "style == 'detailed'"
+    then:
+      - id: deep
+        type: prompt
+        output: answer
+        template: "Deep dive"
+    else:
+      - id: quick
+        type: prompt
+        output: answer
+        template: "Quick take"
+  - id: use
+    type: prompt
+    output: final
+    template: "Answer: {{answer}}"
+outputs:
+  - name: result
+    from: use
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let prompt_exec = MockPromptExecutor::new(vec!["DEEP", "used"]);
+        let tool_exec = MockToolExecutor::always_ok("");
+        let inputs = [("style".to_string(), "detailed".to_string())]
+            .into_iter()
+            .collect();
+
+        let result = execute_workflow(
+            &wf,
+            inputs,
+            &prompt_exec,
+            &tool_exec,
+            Path::new("."),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap();
+
+        // Only the then arm + the post-branch step ran.
+        let calls = prompt_exec.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "Deep dive");
+        assert_eq!(calls[1].0, "Answer: DEEP");
+        assert_eq!(result.outputs["result"], "used");
+    }
+
+    #[tokio::test]
+    async fn branch_runs_else_arm_when_condition_false() {
+        let yaml = r#"
+name: branch-else
+version: "1.0"
+inputs:
+  - name: style
+    type: string
+    required: true
+steps:
+  - id: route
+    type: branch
+    condition: "style == 'detailed'"
+    then:
+      - id: deep
+        type: prompt
+        output: answer
+        template: "Deep dive"
+    else:
+      - id: quick
+        type: prompt
+        output: answer
+        template: "Quick take"
+  - id: use
+    type: prompt
+    output: final
+    template: "Answer: {{answer}}"
+outputs:
+  - name: result
+    from: use
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let prompt_exec = MockPromptExecutor::new(vec!["QUICK", "used"]);
+        let tool_exec = MockToolExecutor::always_ok("");
+        let inputs = [("style".to_string(), "brief".to_string())]
+            .into_iter()
+            .collect();
+
+        let result = execute_workflow(
+            &wf,
+            inputs,
+            &prompt_exec,
+            &tool_exec,
+            Path::new("."),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap();
+
+        let calls = prompt_exec.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "Quick take");
+        assert_eq!(calls[1].0, "Answer: QUICK");
+        assert_eq!(result.outputs["result"], "used");
+    }
+
+    #[tokio::test]
+    async fn branch_false_with_no_else_is_noop() {
+        let yaml = r#"
+name: branch-noop
+version: "1.0"
+inputs:
+  - name: flag
+    type: string
+    required: true
+steps:
+  - id: first
+    type: prompt
+    output: base
+    template: "base"
+  - id: maybe
+    type: branch
+    condition: "flag == 'on'"
+    then:
+      - id: extra
+        type: prompt
+        output: extra_out
+        template: "extra"
+  - id: last
+    type: prompt
+    output: done
+    template: "After {{base}}"
+outputs:
+  - name: result
+    from: last
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        // flag is off → only `first` and `last` run (2 prompt calls).
+        let prompt_exec = MockPromptExecutor::new(vec!["B", "D"]);
+        let tool_exec = MockToolExecutor::always_ok("");
+        let inputs = [("flag".to_string(), "off".to_string())]
+            .into_iter()
+            .collect();
+
+        let result = execute_workflow(
+            &wf,
+            inputs,
+            &prompt_exec,
+            &tool_exec,
+            Path::new("."),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(prompt_exec.call_count(), 2);
+        let calls = prompt_exec.calls();
+        assert_eq!(calls[1].0, "After B");
+        assert_eq!(result.outputs["result"], "D");
+    }
+
+    #[tokio::test]
+    async fn nested_branch_executes_inner_arm() {
+        let yaml = r#"
+name: nested
+version: "1.0"
+inputs:
+  - name: a
+    type: string
+    required: true
+  - name: b
+    type: string
+    required: true
+steps:
+  - id: outer
+    type: branch
+    condition: "a == 'yes'"
+    then:
+      - id: inner
+        type: branch
+        condition: "b == 'yes'"
+        then:
+          - id: both
+            type: prompt
+            output: answer
+            template: "both yes"
+        else:
+          - id: only_a
+            type: prompt
+            output: answer
+            template: "only a"
+    else:
+      - id: neither
+        type: prompt
+        output: answer
+        template: "neither"
+  - id: use
+    type: prompt
+    output: final
+    template: "Got {{answer}}"
+outputs:
+  - name: result
+    from: use
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let prompt_exec = MockPromptExecutor::new(vec!["INNER", "used"]);
+        let tool_exec = MockToolExecutor::always_ok("");
+        let inputs = [
+            ("a".to_string(), "yes".to_string()),
+            ("b".to_string(), "yes".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        let result = execute_workflow(
+            &wf,
+            inputs,
+            &prompt_exec,
+            &tool_exec,
+            Path::new("."),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap();
+
+        let calls = prompt_exec.calls();
+        assert_eq!(calls[0].0, "both yes");
+        assert_eq!(calls[1].0, "Got INNER");
+        assert_eq!(result.outputs["result"], "used");
     }
 
     // --- T032: Transform step tests ---

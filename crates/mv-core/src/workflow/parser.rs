@@ -175,6 +175,64 @@ steps:
     }
 
     #[test]
+    fn parse_branch_step() {
+        let yaml = r#"
+name: branch-test
+version: "1.0"
+steps:
+  - id: route
+    type: branch
+    condition: "style == 'detailed'"
+    then:
+      - id: deep
+        type: prompt
+        output: answer
+        template: "Deep: {{topic}}"
+    else:
+      - id: quick
+        type: prompt
+        output: answer
+        template: "Quick: {{topic}}"
+"#;
+        let wf = load_from_str(yaml, "test.yaml").unwrap();
+        match &wf.steps[0] {
+            Step::Branch(b) => {
+                assert_eq!(b.id, "route");
+                assert_eq!(b.condition, "style == 'detailed'");
+                assert_eq!(b.then.len(), 1);
+                assert_eq!(b.otherwise.len(), 1);
+                assert_eq!(b.then[0].id(), "deep");
+                assert_eq!(b.otherwise[0].id(), "quick");
+            }
+            other => panic!("expected Branch, got {other:?}"),
+        }
+        // A branch step produces no single output.
+        assert_eq!(wf.steps[0].output(), None);
+    }
+
+    #[test]
+    fn parse_branch_without_else() {
+        let yaml = r#"
+name: branch-no-else
+version: "1.0"
+steps:
+  - id: maybe
+    type: branch
+    condition: "flag"
+    then:
+      - id: act
+        type: prompt
+        output: out
+        template: "Act"
+"#;
+        let wf = load_from_str(yaml, "test.yaml").unwrap();
+        match &wf.steps[0] {
+            Step::Branch(b) => assert!(b.otherwise.is_empty()),
+            other => panic!("expected Branch, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_defaults() {
         let wf = load_from_str(VALID_WORKFLOW, "test.yaml").unwrap();
         let defaults = wf.defaults.unwrap();
