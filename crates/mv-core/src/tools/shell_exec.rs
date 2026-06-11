@@ -21,6 +21,9 @@ async fn exec_with_timeout(command: &str, timeout_secs: u64) -> Result<String, T
             "Command must not be empty".to_string().into(),
         ));
     }
+    super::tool_policy()
+        .check_command(command)
+        .map_err(|e| ToolError::ToolCallError(e.into()))?;
 
     // kill_on_drop: when the timeout below fires, the future holding the child
     // is dropped — without this the child keeps running as an orphan.

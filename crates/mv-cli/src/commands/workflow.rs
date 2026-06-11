@@ -13,7 +13,8 @@ pub async fn run_workflow(args: &WorkflowRunArgs, json: bool) -> Result<(), mv_c
     let workflow = mv_core::workflow::parser::load_from_file(path)?;
 
     // Validate structure
-    let validation_errors = mv_core::workflow::validate::validate(&workflow);
+    let workflow_dir = path.parent().unwrap_or(Path::new("."));
+    let validation_errors = mv_core::workflow::validate::validate(&workflow, Some(workflow_dir));
     if !validation_errors.is_empty() {
         let details = validation_errors
             .iter()
@@ -38,6 +39,7 @@ pub async fn run_workflow(args: &WorkflowRunArgs, json: bool) -> Result<(), mv_c
 
     let mcp_connections = connect_mcp_servers(args.mcp_config.as_deref(), &agent_handle).await?;
 
+    let default_model = registry.default_model().id.clone();
     let prompt_exec = RigPromptExecutor {
         registry,
         agent_handle: agent_handle.clone(),
@@ -46,13 +48,13 @@ pub async fn run_workflow(args: &WorkflowRunArgs, json: bool) -> Result<(), mv_c
         handle: agent_handle,
     };
 
-    let workflow_dir = path.parent().unwrap_or(Path::new("."));
     let result = mv_core::workflow::engine::execute_workflow(
         &workflow,
         inputs,
         &prompt_exec,
         &tool_exec,
         workflow_dir,
+        &default_model,
     )
     .await;
 
@@ -82,7 +84,8 @@ pub async fn run_workflow_validate(args: &WorkflowValidateArgs) -> Result<(), mv
     let path = std::path::Path::new(&args.file);
     let workflow = mv_core::workflow::parser::load_from_file(path)?;
 
-    let errors = mv_core::workflow::validate::validate(&workflow);
+    let workflow_dir = path.parent().unwrap_or(std::path::Path::new("."));
+    let errors = mv_core::workflow::validate::validate(&workflow, Some(workflow_dir));
     if errors.is_empty() {
         println!(
             "\u{2713} workflow '{}' is valid ({} steps, {} input{}, {} output{})",

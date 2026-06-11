@@ -336,6 +336,15 @@ pub enum MvError {
     #[error("step '{step}': {details}")]
     WorkflowStepFailed { step: String, details: String },
 
+    /// A step failed with a typed underlying error. Preserves the source so
+    /// retry/routing layers can classify instead of parsing prose.
+    #[error("step '{step}': {source}")]
+    WorkflowStepError {
+        step: String,
+        #[source]
+        source: Box<MvError>,
+    },
+
     #[error("required input '{name}' not provided")]
     WorkflowInputMissing { name: String },
 

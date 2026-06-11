@@ -97,6 +97,23 @@ impl MvError {
                 | MvError::ApiKeyMissing { .. }
         )
     }
+
+    /// Whether an error class may be transient. The workflow retry handler
+    /// re-attempts only these; permanent failures (validation, missing
+    /// inputs, config mistakes) fail immediately regardless of
+    /// `on_error: retry`. `ToolCallFailed` is included because tool failures
+    /// are often transient (network, busy resource) — the cost is that a
+    /// genuinely-unknown tool name is also retried until tool errors are
+    /// differentiated.
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            MvError::BackendUnreachable { .. }
+                | MvError::CompletionFailed { .. }
+                | MvError::ToolCallFailed { .. }
+                | MvError::McpServerError { .. }
+        )
+    }
 }
 
 #[cfg(test)]

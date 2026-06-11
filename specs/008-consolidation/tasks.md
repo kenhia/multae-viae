@@ -80,23 +80,29 @@ missing. Live-backend tests stay `#[ignore]`d.
 
 ## Phase 3: WS3 — Engine prep
 
-- [ ] T018 [WS3] Extract `execute_step`/`execute_steps` from the inline match;
+- [X] T018 [WS3] Extract `execute_step`/`execute_steps` from the inline match;
   move transforms to `workflow/transform.rs` (single `KNOWN_TRANSFORMS` source);
   retry logic to `workflow/retry.rs` (F15, F-wf-I10)
-- [ ] T019 [WS3] Encapsulate `ExecutionContext` (private fields; `get`/`insert`/
+- [X] T019 [WS3] Encapsulate `ExecutionContext` (private fields; `get`/`insert`/
   `snapshot`); make engine default-model a required parameter (drop hardcoded
   `"qwen3:4b"`) (F15)
-- [ ] T020 [WS3] Add `Send` bounds to `PromptExecutor`/`ToolExecutor` (F15)
-- [ ] T021 [WS3] Replace naive `{{…}}` scanner with minijinja
+- [X] T020 [WS3] Add `Send` bounds to `PromptExecutor`/`ToolExecutor` (F15)
+- [X] T021 [WS3] Replace naive `{{…}}` scanner with minijinja
   `undeclared_variables()`; validate `template_file` contents; recurse template
   rendering through nested tool-input values (F16, F-wf-I9)
-- [ ] T022 [WS3] `DuplicateOutputName` error + `OutputShadowsInput` warning in
+- [X] T022 [WS3] `DuplicateOutputName` error + `OutputShadowsInput` warning in
   validation (F17)
-- [ ] T023 [WS3] `WorkflowStepFailed { step, source: Box<MvError> }`; retry only
-  `is_retryable()` errors; configurable base delay; document side-effect
-  re-execution (F18)
-- [ ] T024 [WS3] `ToolPolicy` seam (default-allow) threaded through built-in tool
-  construction (F19)
+- [X] T023 [WS3] Typed step errors; retry only `is_retryable()` errors;
+  configurable `base_delay_ms`; side-effect re-execution documented in
+  retry.rs (F18). *Deviation: added a new `WorkflowStepError { step,
+  source: Box<MvError> }` variant alongside `WorkflowStepFailed` rather than
+  changing the existing variant — engine-internal string failures (e.g. "no
+  template specified") have no meaningful source error to box.*
+- [X] T024 [WS3] `ToolPolicy` seam (default-allow), consulted by all four
+  built-in tools (F19). *Deviation: a process-global `set_tool_policy()` /
+  `tool_policy()` (OnceLock) rather than constructor injection — the rig
+  tool macro generates unit structs from free functions, so per-instance
+  injection would mean abandoning the macro.*
 
 **Checkpoint**: branch/parallel/loop are additive changes, not rewrites.
 

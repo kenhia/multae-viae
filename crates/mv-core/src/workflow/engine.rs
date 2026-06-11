@@ -1,39 +1,49 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
+use super::retry::execute_tool_with_error_handling;
 use super::template;
-use super::types::{ErrorAction, Step, Workflow};
+use super::types::{Step, Workflow};
 use crate::MvError;
 
+// Re-exported so existing callers (and tests) keep one import path.
+pub use super::transform::execute_transform;
+
 /// Trait for executing prompt steps — enables mocking in tests.
-#[allow(async_fn_in_trait)]
-pub trait PromptExecutor {
-    async fn execute_prompt(
+///
+/// Methods return `Send` futures and implementors are `Send + Sync` so step
+/// execution can be moved onto worker tasks (the Phase 5 `parallel` step
+/// type spawns arms with `tokio::spawn`).
+pub trait PromptExecutor: Send + Sync {
+    fn execute_prompt(
         &self,
         prompt_text: &str,
         model: &str,
         temperature: Option<f64>,
         max_tokens: Option<u64>,
-    ) -> Result<String, MvError>;
+    ) -> impl std::future::Future<Output = Result<String, MvError>> + Send;
 }
 
 /// Trait for executing tool steps — enables mocking in tests.
-#[allow(async_fn_in_trait)]
-pub trait ToolExecutor {
-    async fn execute_tool(
+pub trait ToolExecutor: Send + Sync {
+    fn execute_tool(
         &self,
         tool_name: &str,
         inputs: &HashMap<String, serde_json::Value>,
-    ) -> Result<String, MvError>;
+    ) -> impl std::future::Future<Output = Result<String, MvError>> + Send;
 }
 
 /// Context for workflow execution, tracking step outputs and inputs.
-#[derive(Debug)]
+///
+/// Fields are private so the representation can evolve (snapshot isolation
+/// for parallel arms, scoped frames for loop iterations) without breaking
+/// callers — go through the accessors.
+#[derive(Debug, Clone)]
 pub struct ExecutionContext {
-    pub inputs: HashMap<String, String>,
-    pub outputs: HashMap<String, String>,
+    inputs: HashMap<String, String>,
+    outputs: HashMap<String, String>,
 }
 
 impl ExecutionContext {
@@ -44,11 +54,28 @@ impl ExecutionContext {
         }
     }
 
+    /// Record a step output. Outputs shadow inputs of the same name in
+    /// subsequent template contexts.
+    pub fn insert_output(&mut self, name: impl Into<String>, value: String) {
+        self.outputs.insert(name.into(), value);
+    }
+
+    /// Look up a recorded step output.
+    pub fn output(&self, name: &str) -> Option<&str> {
+        self.outputs.get(name).map(String::as_str)
+    }
+
     /// Build a template variable map: outputs shadow inputs.
     pub fn to_template_context(&self) -> HashMap<String, String> {
         let mut vars = self.inputs.clone();
         vars.extend(self.outputs.clone());
         vars
+    }
+
+    /// Immutable copy of the current state. Parallel arms will each receive
+    /// a snapshot taken at the fork, never a shared mutable context.
+    pub fn snapshot(&self) -> Self {
+        self.clone()
     }
 }
 
@@ -56,6 +83,13 @@ impl ExecutionContext {
 #[derive(Debug)]
 pub struct WorkflowResult {
     pub outputs: HashMap<String, String>,
+}
+
+/// Defaults applied to prompt steps that don't override them.
+struct StepDefaults {
+    model: String,
+    temperature: Option<f64>,
+    max_tokens: Option<u64>,
 }
 
 /// Validate required inputs and apply defaults. Returns the resolved inputs map.
@@ -92,9 +126,13 @@ pub fn validate_inputs(
 }
 
 /// Execute a workflow sequentially.
+///
+/// `default_model` is used by prompt steps when neither the step nor the
+/// workflow `defaults` name a model — pass the registry's default; the
+/// engine itself has no provider knowledge and no built-in model name.
 #[tracing::instrument(
     name = "workflow_execute",
-    skip(workflow, inputs, prompt_executor, tool_executor, workflow_dir),
+    skip(workflow, inputs, prompt_executor, tool_executor, workflow_dir, default_model),
     fields(
         workflow.name = %workflow.name,
         workflow.version = %workflow.version,
@@ -107,22 +145,51 @@ pub async fn execute_workflow<P: PromptExecutor, T: ToolExecutor>(
     prompt_executor: &P,
     tool_executor: &T,
     workflow_dir: &Path,
+    default_model: &str,
 ) -> Result<WorkflowResult, MvError> {
     // Validate inputs
     let resolved_inputs = validate_inputs(workflow, inputs)?;
     let mut ctx = ExecutionContext::new(resolved_inputs);
 
-    // Get default model
-    let default_model = workflow
-        .defaults
-        .as_ref()
-        .and_then(|d| d.model.clone())
-        .unwrap_or_else(|| "qwen3:4b".to_string());
-    let default_temp = workflow.defaults.as_ref().and_then(|d| d.temperature);
-    let default_max_tokens = workflow.defaults.as_ref().and_then(|d| d.max_tokens);
+    let defaults = StepDefaults {
+        model: workflow
+            .defaults
+            .as_ref()
+            .and_then(|d| d.model.clone())
+            .unwrap_or_else(|| default_model.to_string()),
+        temperature: workflow.defaults.as_ref().and_then(|d| d.temperature),
+        max_tokens: workflow.defaults.as_ref().and_then(|d| d.max_tokens),
+    };
 
-    // Execute steps sequentially
-    for step in &workflow.steps {
+    execute_steps(
+        &workflow.steps,
+        &mut ctx,
+        &defaults,
+        prompt_executor,
+        tool_executor,
+        workflow_dir,
+    )
+    .await?;
+
+    // Build final outputs
+    let final_outputs = build_workflow_outputs(workflow, &ctx);
+    Ok(WorkflowResult {
+        outputs: final_outputs,
+    })
+}
+
+/// Run a step list against a mutable context. Extracted from
+/// `execute_workflow` so future nested step types (`branch`, `workflow`)
+/// can recurse into a sub-list (via `Box::pin`).
+async fn execute_steps<P: PromptExecutor, T: ToolExecutor>(
+    steps: &[Step],
+    ctx: &mut ExecutionContext,
+    defaults: &StepDefaults,
+    prompt_executor: &P,
+    tool_executor: &T,
+    workflow_dir: &Path,
+) -> Result<(), MvError> {
+    for step in steps {
         let step_span = tracing::info_span!(
             "workflow_step",
             step.id = %step.id(),
@@ -134,77 +201,15 @@ pub async fn execute_workflow<P: PromptExecutor, T: ToolExecutor>(
 
         debug!(step_id = %step.id(), step_type = %step_type_name(step), "executing step");
 
-        let output = match step {
-            Step::Prompt(ps) => {
-                let model = ps.model.as_deref().unwrap_or(&default_model);
-                let temp = ps.temperature.or(default_temp);
-                let max_tok = ps.max_tokens.or(default_max_tokens);
-
-                // Resolve template
-                let template_str = if let Some(ref tmpl) = ps.template {
-                    tmpl.clone()
-                } else if let Some(ref file) = ps.template_file {
-                    template::load_template_file(file, workflow_dir).map_err(|_| {
-                        MvError::WorkflowTemplateError {
-                            step: ps.id.clone(),
-                            details: format!("template file not found: {file}"),
-                        }
-                    })?
-                } else {
-                    return Err(MvError::WorkflowStepFailed {
-                        step: ps.id.clone(),
-                        details: "no template or template_file specified".to_string(),
-                    });
-                };
-
-                let vars = ctx.to_template_context();
-                let rendered = template::render_template(&template_str, &vars).map_err(|e| {
-                    MvError::WorkflowTemplateError {
-                        step: ps.id.clone(),
-                        details: e.to_string(),
-                    }
-                })?;
-
-                prompt_executor
-                    .execute_prompt(&rendered, model, temp, max_tok)
-                    .await
-                    .map_err(|e| MvError::WorkflowStepFailed {
-                        step: ps.id.clone(),
-                        details: e.to_string(),
-                    })?
-            }
-            Step::Tool(ts) => {
-                // Render tool inputs from context
-                let vars = ctx.to_template_context();
-                let mut rendered_inputs = HashMap::new();
-                for (key, val) in &ts.inputs {
-                    if let Some(s) = val.as_str() {
-                        let rendered = template::render_template(s, &vars).map_err(|e| {
-                            MvError::WorkflowTemplateError {
-                                step: ts.id.clone(),
-                                details: e.to_string(),
-                            }
-                        })?;
-                        rendered_inputs.insert(key.clone(), serde_json::Value::String(rendered));
-                    } else {
-                        rendered_inputs.insert(key.clone(), val.clone());
-                    }
-                }
-
-                execute_tool_with_error_handling(ts, &rendered_inputs, tool_executor).await?
-            }
-            Step::Transform(ts) => {
-                let vars = ctx.to_template_context();
-                let input_value = template::render_template(&ts.input, &vars).map_err(|e| {
-                    MvError::WorkflowTemplateError {
-                        step: ts.id.clone(),
-                        details: e.to_string(),
-                    }
-                })?;
-
-                execute_transform(&ts.id, &ts.operation, &input_value, ts.schema.as_ref())?
-            }
-        };
+        let output = execute_step(
+            step,
+            ctx,
+            defaults,
+            prompt_executor,
+            tool_executor,
+            workflow_dir,
+        )
+        .await?;
 
         info!(
             step_id = %step.id(),
@@ -213,13 +218,113 @@ pub async fn execute_workflow<P: PromptExecutor, T: ToolExecutor>(
             duration_ms = start.elapsed().as_millis() as u64,
             "step completed"
         );
-        ctx.outputs.insert(step.output().to_string(), output);
+        ctx.insert_output(step.output(), output);
     }
+    Ok(())
+}
 
-    // Build final outputs
-    let final_outputs = build_workflow_outputs(workflow, &ctx);
-    Ok(WorkflowResult {
-        outputs: final_outputs,
+/// Execute a single step against an immutable view of the context.
+async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
+    step: &Step,
+    ctx: &ExecutionContext,
+    defaults: &StepDefaults,
+    prompt_executor: &P,
+    tool_executor: &T,
+    workflow_dir: &Path,
+) -> Result<String, MvError> {
+    match step {
+        Step::Prompt(ps) => {
+            let model = ps.model.as_deref().unwrap_or(&defaults.model);
+            let temp = ps.temperature.or(defaults.temperature);
+            let max_tok = ps.max_tokens.or(defaults.max_tokens);
+
+            // Resolve template
+            let template_str = if let Some(ref tmpl) = ps.template {
+                tmpl.clone()
+            } else if let Some(ref file) = ps.template_file {
+                template::load_template_file(file, workflow_dir).map_err(|_| {
+                    MvError::WorkflowTemplateError {
+                        step: ps.id.clone(),
+                        details: format!("template file not found: {file}"),
+                    }
+                })?
+            } else {
+                return Err(MvError::WorkflowStepFailed {
+                    step: ps.id.clone(),
+                    details: "no template or template_file specified".to_string(),
+                });
+            };
+
+            let vars = ctx.to_template_context();
+            let rendered = template::render_template(&template_str, &vars).map_err(|e| {
+                MvError::WorkflowTemplateError {
+                    step: ps.id.clone(),
+                    details: e.to_string(),
+                }
+            })?;
+
+            prompt_executor
+                .execute_prompt(&rendered, model, temp, max_tok)
+                .await
+                .map_err(|e| MvError::WorkflowStepError {
+                    step: ps.id.clone(),
+                    source: Box::new(e),
+                })
+        }
+        Step::Tool(ts) => {
+            // Render tool inputs from context — every string leaf, including
+            // ones nested inside objects and arrays.
+            let vars = ctx.to_template_context();
+            let mut rendered_inputs = HashMap::new();
+            for (key, val) in &ts.inputs {
+                rendered_inputs.insert(key.clone(), render_json_value(val, &vars, &ts.id)?);
+            }
+
+            execute_tool_with_error_handling(ts, &rendered_inputs, tool_executor).await
+        }
+        Step::Transform(ts) => {
+            let vars = ctx.to_template_context();
+            let input_value = template::render_template(&ts.input, &vars).map_err(|e| {
+                MvError::WorkflowTemplateError {
+                    step: ts.id.clone(),
+                    details: e.to_string(),
+                }
+            })?;
+
+            execute_transform(&ts.id, &ts.operation, &input_value, ts.schema.as_ref())
+        }
+    }
+}
+
+/// Render every string leaf of a JSON value through the template engine —
+/// nested objects/arrays included, so `inputs: {headers: {auth: "{{token}}"}}`
+/// interpolates instead of passing the literal braces to the tool.
+fn render_json_value(
+    val: &serde_json::Value,
+    vars: &HashMap<String, String>,
+    step_id: &str,
+) -> Result<serde_json::Value, MvError> {
+    Ok(match val {
+        serde_json::Value::String(s) => {
+            let rendered =
+                template::render_template(s, vars).map_err(|e| MvError::WorkflowTemplateError {
+                    step: step_id.to_string(),
+                    details: e.to_string(),
+                })?;
+            serde_json::Value::String(rendered)
+        }
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .map(|v| render_json_value(v, vars, step_id))
+                .collect::<Result<_, _>>()?,
+        ),
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(k, v)| Ok((k.clone(), render_json_value(v, vars, step_id)?)))
+                .collect::<Result<_, MvError>>()?,
+        ),
+        other => other.clone(),
     })
 }
 
@@ -231,196 +336,13 @@ fn step_type_name(step: &Step) -> &'static str {
     }
 }
 
-/// Upper bound on a single retry backoff sleep — exponential growth past this
-/// would stall a workflow for minutes.
-const MAX_RETRY_DELAY_MS: u64 = 30_000;
-
-async fn execute_tool_with_error_handling<T: ToolExecutor>(
-    ts: &super::types::ToolStep,
-    rendered_inputs: &HashMap<String, serde_json::Value>,
-    tool_executor: &T,
-) -> Result<String, MvError> {
-    let execute = || async { tool_executor.execute_tool(&ts.tool, rendered_inputs).await };
-
-    match &ts.on_error {
-        ErrorAction::Fail => execute().await.map_err(|e| MvError::WorkflowStepFailed {
-            step: ts.id.clone(),
-            details: format!("tool '{}' failed: {e}", ts.tool),
-        }),
-        ErrorAction::Skip => match execute().await {
-            Ok(output) => Ok(output),
-            Err(e) => {
-                warn!(
-                    step_id = %ts.id,
-                    tool = %ts.tool,
-                    error = %e,
-                    "tool failed, skipping"
-                );
-                Ok(String::new())
-            }
-        },
-        ErrorAction::Retry => {
-            let retry = ts.retry.as_ref();
-            let max_attempts = retry.map_or(3, |r| r.max_attempts);
-            // Defense in depth: validation rejects max_attempts == 0, but the
-            // engine is a library API callable without prior validation — a
-            // zero here must be an error, never a panic.
-            if max_attempts == 0 {
-                return Err(MvError::WorkflowStepFailed {
-                    step: ts.id.clone(),
-                    details: "invalid retry config: max_attempts must be at least 1".to_string(),
-                });
-            }
-            let is_exponential =
-                retry.is_none_or(|r| r.backoff == super::types::BackoffStrategy::Exponential);
-
-            for attempt in 1..=max_attempts {
-                match execute().await {
-                    Ok(output) => return Ok(output),
-                    Err(e) => {
-                        if attempt == max_attempts {
-                            return Err(MvError::WorkflowStepFailed {
-                                step: ts.id.clone(),
-                                details: format!(
-                                    "tool '{}' failed after {max_attempts} attempts: {e}",
-                                    ts.tool
-                                ),
-                            });
-                        }
-                        let delay_ms = if is_exponential {
-                            100u64
-                                .saturating_mul(2u64.saturating_pow(attempt - 1))
-                                .min(MAX_RETRY_DELAY_MS)
-                        } else {
-                            100
-                        };
-                        warn!(
-                            step_id = %ts.id,
-                            tool = %ts.tool,
-                            attempt = attempt,
-                            max_attempts = max_attempts,
-                            "tool failed, retrying"
-                        );
-                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                    }
-                }
-            }
-            // The loop always returns on the final attempt (max_attempts >= 1).
-            Err(MvError::WorkflowStepFailed {
-                step: ts.id.clone(),
-                details: "retry loop ended without a result".to_string(),
-            })
-        }
-    }
-}
-
-/// Execute a transform step.
-pub fn execute_transform(
-    step_id: &str,
-    operation: &str,
-    input: &str,
-    schema: Option<&serde_json::Value>,
-) -> Result<String, MvError> {
-    match operation {
-        "extract_json" => extract_json(step_id, input, schema),
-        other => Err(MvError::WorkflowStepFailed {
-            step: step_id.to_string(),
-            details: format!("unknown transform operation: {other}"),
-        }),
-    }
-}
-
-/// Extract JSON from text, handling markdown code fences.
-fn extract_json(
-    step_id: &str,
-    input: &str,
-    schema: Option<&serde_json::Value>,
-) -> Result<String, MvError> {
-    // Try to extract JSON from markdown code fences first
-    let json_str = if let Some(start) = input.find("```json") {
-        let content_start = start + 7;
-        let end = input[content_start..]
-            .find("```")
-            .map(|e| content_start + e)
-            .unwrap_or(input.len());
-        input[content_start..end].trim()
-    } else if let Some(start) = input.find("```") {
-        let content_start = start + 3;
-        // Skip the language identifier line
-        let after_lang = input[content_start..]
-            .find('\n')
-            .map(|n| content_start + n + 1)
-            .unwrap_or(content_start);
-        let end = input[after_lang..]
-            .find("```")
-            .map(|e| after_lang + e)
-            .unwrap_or(input.len());
-        input[after_lang..end].trim()
-    } else {
-        input.trim()
-    };
-
-    // Parse JSON
-    let parsed: serde_json::Value =
-        serde_json::from_str(json_str).map_err(|e| MvError::WorkflowStepFailed {
-            step: step_id.to_string(),
-            details: format!("extract_json failed: {e}"),
-        })?;
-
-    // Optional schema validation (structural comparison)
-    if let Some(expected) = schema {
-        validate_json_structure(&parsed, expected).map_err(|msg| MvError::WorkflowStepFailed {
-            step: step_id.to_string(),
-            details: format!("schema validation failed: {msg}"),
-        })?;
-    }
-
-    Ok(parsed.to_string())
-}
-
-/// Simple structural comparison: check that the parsed JSON has the same
-/// top-level keys and value types as the schema template.
-fn validate_json_structure(
-    actual: &serde_json::Value,
-    expected: &serde_json::Value,
-) -> Result<(), String> {
-    match (actual, expected) {
-        (serde_json::Value::Object(a), serde_json::Value::Object(e)) => {
-            for key in e.keys() {
-                if !a.contains_key(key) {
-                    return Err(format!("missing key: '{key}'"));
-                }
-            }
-            Ok(())
-        }
-        (serde_json::Value::Array(_), serde_json::Value::Array(_)) => Ok(()),
-        (a, e) if std::mem::discriminant(a) == std::mem::discriminant(e) => Ok(()),
-        (a, e) => Err(format!(
-            "type mismatch: expected {}, got {}",
-            json_type_name(e),
-            json_type_name(a)
-        )),
-    }
-}
-
-fn json_type_name(v: &serde_json::Value) -> &'static str {
-    match v {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "boolean",
-        serde_json::Value::Number(_) => "number",
-        serde_json::Value::String(_) => "string",
-        serde_json::Value::Array(_) => "array",
-        serde_json::Value::Object(_) => "object",
-    }
-}
-
 fn build_workflow_outputs(workflow: &Workflow, ctx: &ExecutionContext) -> HashMap<String, String> {
     if workflow.outputs.is_empty() {
         // When no outputs specified, return last step's output
         if let Some(last_step) = workflow.steps.last() {
             let mut map = HashMap::new();
-            if let Some(output) = ctx.outputs.get(last_step.output()) {
-                map.insert(last_step.output().to_string(), output.clone());
+            if let Some(output) = ctx.output(last_step.output()) {
+                map.insert(last_step.output().to_string(), output.to_string());
             }
             map
         } else {
@@ -434,9 +356,8 @@ fn build_workflow_outputs(workflow: &Workflow, ctx: &ExecutionContext) -> HashMa
                 // wo.from is a step ID — find that step's output name
                 let step = workflow.steps.iter().find(|s| s.id() == wo.from)?;
                 let output_name = step.output();
-                ctx.outputs
-                    .get(output_name)
-                    .map(|v| (wo.name.clone(), v.clone()))
+                ctx.output(output_name)
+                    .map(|v| (wo.name.clone(), v.to_string()))
             })
             .collect()
     }
@@ -520,22 +441,20 @@ mod tests {
     impl ToolExecutor for MockToolExecutor {
         async fn execute_tool(
             &self,
-            _tool_name: &str,
+            tool_name: &str,
             _inputs: &HashMap<String, serde_json::Value>,
         ) -> Result<String, MvError> {
             let mut responses = self.responses.lock().unwrap();
             if responses.is_empty() {
-                Err(MvError::WorkflowStepFailed {
-                    step: String::new(),
+                Err(MvError::ToolCallFailed {
+                    tool: tool_name.to_string(),
                     details: "no more mock responses".to_string(),
                 })
             } else {
-                responses
-                    .remove(0)
-                    .map_err(|e| MvError::WorkflowStepFailed {
-                        step: String::new(),
-                        details: e,
-                    })
+                responses.remove(0).map_err(|e| MvError::ToolCallFailed {
+                    tool: tool_name.to_string(),
+                    details: e,
+                })
             }
         }
     }
@@ -547,8 +466,7 @@ mod tests {
                 .into_iter()
                 .collect(),
         );
-        ctx.outputs
-            .insert("topic".to_string(), "output_value".to_string());
+        ctx.insert_output("topic".to_string(), "output_value".to_string());
         let vars = ctx.to_template_context();
         assert_eq!(vars["topic"], "output_value");
     }
@@ -560,8 +478,7 @@ mod tests {
                 .into_iter()
                 .collect(),
         );
-        ctx.outputs
-            .insert("output_key".to_string(), "output_val".to_string());
+        ctx.insert_output("output_key".to_string(), "output_val".to_string());
         let vars = ctx.to_template_context();
         assert_eq!(vars["input_key"], "input_val");
         assert_eq!(vars["output_key"], "output_val");
@@ -593,6 +510,7 @@ steps:
             &prompt_exec,
             &tool_exec,
             Path::new("."),
+            "qwen3:4b",
         )
         .await;
 
@@ -635,9 +553,16 @@ outputs:
             .into_iter()
             .collect();
 
-        let result = execute_workflow(&wf, inputs, &prompt_exec, &tool_exec, Path::new("."))
-            .await
-            .unwrap();
+        let result = execute_workflow(
+            &wf,
+            inputs,
+            &prompt_exec,
+            &tool_exec,
+            Path::new("."),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap();
 
         assert_eq!(prompt_exec.call_count(), 2);
         let calls = prompt_exec.calls();
@@ -685,9 +610,16 @@ steps:
             .into_iter()
             .collect();
 
-        let result = execute_workflow(&wf, inputs, &prompt_exec, &tool_exec, Path::new("."))
-            .await
-            .unwrap();
+        let result = execute_workflow(
+            &wf,
+            inputs,
+            &prompt_exec,
+            &tool_exec,
+            Path::new("."),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap();
 
         assert_eq!(prompt_exec.call_count(), 5);
         // Last step output is returned when no outputs specified
@@ -719,6 +651,7 @@ steps:
             &prompt_exec,
             &tool_exec,
             Path::new("."),
+            "qwen3:4b",
         )
         .await
         .unwrap();
@@ -755,6 +688,7 @@ steps:
             &prompt_exec,
             &tool_exec,
             Path::new("."),
+            "qwen3:4b",
         )
         .await
         .unwrap_err();
@@ -784,9 +718,16 @@ steps:
             .into_iter()
             .collect();
 
-        let err = execute_workflow(&wf, inputs, &prompt_exec, &tool_exec, Path::new("."))
-            .await
-            .unwrap_err();
+        let err = execute_workflow(
+            &wf,
+            inputs,
+            &prompt_exec,
+            &tool_exec,
+            Path::new("."),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, MvError::WorkflowInputInvalid { .. }));
     }
 
@@ -815,6 +756,7 @@ steps:
             &prompt_exec,
             &tool_exec,
             Path::new("."),
+            "qwen3:4b",
         )
         .await
         .unwrap();
@@ -853,6 +795,7 @@ steps:
             &prompt_exec,
             &tool_exec,
             Path::new("."),
+            "qwen3:4b",
         )
         .await
         .unwrap();
@@ -891,6 +834,7 @@ steps:
             &prompt_exec,
             &tool_exec,
             Path::new("."),
+            "qwen3:4b",
         )
         .await
         .unwrap();
@@ -925,9 +869,16 @@ steps:
             .into_iter()
             .collect();
 
-        let result = execute_workflow(&wf, inputs, &prompt_exec, &tool_exec, Path::new("."))
-            .await
-            .unwrap();
+        let result = execute_workflow(
+            &wf,
+            inputs,
+            &prompt_exec,
+            &tool_exec,
+            Path::new("."),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.outputs["files"], "contents");
     }
@@ -960,6 +911,7 @@ steps:
             &prompt_exec,
             &tool_exec,
             Path::new("."),
+            "qwen3:4b",
         )
         .await
         .unwrap();
@@ -996,12 +948,78 @@ steps:
             &prompt_exec,
             &tool_exec,
             Path::new("."),
+            "qwen3:4b",
         )
         .await
         .unwrap_err();
 
-        assert!(matches!(err, MvError::WorkflowStepFailed { .. }));
+        // 008/T023: the typed source survives the step wrapper.
+        match &err {
+            MvError::WorkflowStepError { step, source } => {
+                assert_eq!(step, "failing_tool");
+                assert!(matches!(**source, MvError::ToolCallFailed { .. }));
+            }
+            other => panic!("expected WorkflowStepError, got: {other:?}"),
+        }
         assert_eq!(prompt_exec.call_count(), 0); // Next step never executed
+    }
+
+    #[tokio::test]
+    async fn retry_does_not_reattempt_permanent_errors() {
+        // 008/T023: only is_retryable() errors are re-attempted. A permanent
+        // failure under `on_error: retry` fails on attempt 1.
+        struct PermanentErrorToolExecutor {
+            calls: Mutex<u32>,
+        }
+        impl ToolExecutor for PermanentErrorToolExecutor {
+            async fn execute_tool(
+                &self,
+                _tool_name: &str,
+                _inputs: &HashMap<String, serde_json::Value>,
+            ) -> Result<String, MvError> {
+                *self.calls.lock().unwrap() += 1;
+                Err(MvError::EmptyPrompt) // stand-in for a non-retryable class
+            }
+        }
+
+        let yaml = r#"
+name: test
+version: "1.0"
+steps:
+  - id: t1
+    type: tool
+    output: out
+    tool: some_tool
+    on_error: retry
+    retry:
+      max_attempts: 3
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let prompt_exec = MockPromptExecutor::new(vec![]);
+        let tool_exec = PermanentErrorToolExecutor {
+            calls: Mutex::new(0),
+        };
+
+        let err = execute_workflow(
+            &wf,
+            HashMap::new(),
+            &prompt_exec,
+            &tool_exec,
+            Path::new("."),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            &err,
+            MvError::WorkflowStepError { source, .. } if matches!(**source, MvError::EmptyPrompt)
+        ));
+        assert_eq!(
+            *tool_exec.calls.lock().unwrap(),
+            1,
+            "permanent error must not be retried"
+        );
     }
 
     #[tokio::test]
@@ -1030,6 +1048,7 @@ steps:
             &prompt_exec,
             &tool_exec,
             Path::new("."),
+            "qwen3:4b",
         )
         .await
         .unwrap();
@@ -1062,6 +1081,7 @@ steps:
             &prompt_exec,
             &tool_exec,
             Path::new("."),
+            "qwen3:4b",
         )
         .await
         .unwrap_err();
@@ -1162,6 +1182,7 @@ steps:
             &prompt_exec,
             &tool_exec,
             Path::new("."),
+            "qwen3:4b",
         )
         .await
         .unwrap();

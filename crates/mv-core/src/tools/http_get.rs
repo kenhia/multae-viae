@@ -12,6 +12,9 @@ use super::truncate_output;
     required(url)
 )]
 pub async fn http_get(url: String) -> Result<String, ToolError> {
+    super::tool_policy()
+        .check_url(&url)
+        .map_err(|e| ToolError::ToolCallError(e.into()))?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS))
         .build()

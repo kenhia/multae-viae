@@ -163,6 +163,9 @@ pub struct RetryConfig {
     pub max_attempts: u32,
     #[serde(default)]
     pub backoff: BackoffStrategy,
+    /// Base delay between attempts in milliseconds (default 100).
+    #[serde(default)]
+    pub base_delay_ms: Option<u64>,
 }
 
 fn default_max_attempts() -> u32 {
