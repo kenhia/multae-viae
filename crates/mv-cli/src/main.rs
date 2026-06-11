@@ -65,6 +65,22 @@ struct PromptArgs {
     /// Path to MCP servers YAML config file [default: mcp-servers.yaml]
     #[arg(long)]
     mcp_config: Option<String>,
+
+    /// Stream tokens to stdout as they arrive (TRT-LLM models only).
+    ///
+    /// Built-in and MCP tools are attached by default, and the TRT-LLM proxy
+    /// streams tool calls as plain text rather than executable calls — so with
+    /// tools attached, `--stream` falls back to buffered output (where tool
+    /// calling works). Combine with `--no-tools` to stream without tools.
+    #[arg(long)]
+    stream: bool,
+
+    /// Disable all tools (built-in and MCP) for this request.
+    ///
+    /// Required to actually stream from TRT-LLM: `--stream --no-tools` streams
+    /// tokens with no tool access.
+    #[arg(long)]
+    no_tools: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -113,6 +129,7 @@ fn parse_key_value(s: &str) -> Result<(String, String), String> {
 async fn run_prompt(
     args: &PromptArgs,
     _json: bool,
+    effective_stream: bool,
 ) -> std::result::Result<String, mv_core::MvError> {
     let prompt = mv_core::validate_prompt(&args.prompt)?;
 
@@ -142,35 +159,66 @@ async fn run_prompt(
         "resolved model"
     );
 
-    // Set up agent ToolServer with built-in tools
-    let tool_server = ToolServer::new()
-        .tool(mv_core::tools::file_list::FileList)
-        .tool(mv_core::tools::file_read::FileRead)
-        .tool(mv_core::tools::shell_exec::ShellExec)
-        .tool(mv_core::tools::http_get::HttpGet);
+    // Streaming is currently only implemented for TRT-LLM.
+    if effective_stream && entry.provider != "trtllm" {
+        return Err(mv_core::MvError::StreamingNotSupported);
+    }
+
+    // The TRT-LLM proxy streams tool calls as plain text rather than as
+    // executable `tool_calls`, so streaming with tools attached produces fake,
+    // never-executed tool-call text. Prefer correctness: when tools are
+    // attached, fall back to buffered (which performs the real tool round-trip).
+    // `--no-tools` opts out and enables genuine streaming.
+    let stream_trtllm_path = effective_stream && entry.provider == "trtllm" && args.no_tools;
+    if effective_stream && entry.provider == "trtllm" && !args.no_tools {
+        eprintln!(
+            "note: --stream falls back to buffered output because tools are attached \
+             (the TRT-LLM proxy cannot stream tool calls); re-run with --no-tools to stream"
+        );
+    }
+
+    // Set up agent ToolServer. `--no-tools` attaches nothing (built-in or MCP),
+    // which is what makes clean TRT-LLM streaming possible.
+    let mut tool_server = ToolServer::new();
+    if !args.no_tools {
+        tool_server = tool_server
+            .tool(mv_core::tools::file_list::FileList)
+            .tool(mv_core::tools::file_read::FileRead)
+            .tool(mv_core::tools::shell_exec::ShellExec)
+            .tool(mv_core::tools::http_get::HttpGet);
+    }
     let agent_handle = tool_server.run();
 
-    // Connect MCP servers to a separate handle, then register cleaned tools on the agent handle
-    let mcp_connections = connect_mcp_servers(args.mcp_config.as_deref(), &agent_handle).await?;
+    // Connect MCP servers to a separate handle, then register cleaned tools on
+    // the agent handle (skipped entirely under --no-tools).
+    let mcp_connections = if args.no_tools {
+        Vec::new()
+    } else {
+        connect_mcp_servers(args.mcp_config.as_deref(), &agent_handle).await?
+    };
 
-    let result = match entry.provider.as_str() {
-        "ollama" => call_ollama(&entry.id, &endpoint, prompt, agent_handle).await,
-        "openai" => {
-            let env_var = entry.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY");
-            match std::env::var(env_var) {
-                Ok(api_key) => {
-                    call_openai(&entry.id, &endpoint, &api_key, prompt, agent_handle).await
+    let result = if stream_trtllm_path {
+        stream_trtllm(entry, &endpoint, prompt, agent_handle).await
+    } else {
+        match entry.provider.as_str() {
+            "ollama" => call_ollama(&entry.id, &endpoint, prompt, agent_handle).await,
+            "openai" => {
+                let env_var = entry.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY");
+                match std::env::var(env_var) {
+                    Ok(api_key) => {
+                        call_openai(&entry.id, &endpoint, &api_key, prompt, agent_handle).await
+                    }
+                    Err(_) => Err(mv_core::MvError::ApiKeyMissing {
+                        provider: entry.provider.clone(),
+                        env_var: env_var.to_string(),
+                    }),
                 }
-                Err(_) => Err(mv_core::MvError::ApiKeyMissing {
-                    provider: entry.provider.clone(),
-                    env_var: env_var.to_string(),
-                }),
             }
+            "trtllm" => call_trtllm(entry, &endpoint, prompt, agent_handle).await,
+            other => Err(mv_core::MvError::CompletionFailed {
+                details: format!("unsupported provider: {other}"),
+            }),
         }
-        "trtllm" => call_trtllm(entry, &endpoint, prompt, agent_handle).await,
-        other => Err(mv_core::MvError::CompletionFailed {
-            details: format!("unsupported provider: {other}"),
-        }),
     };
 
     // Always shut down MCP connections, even on error
@@ -243,7 +291,7 @@ async fn call_ollama(
     info!("sending prompt to model");
     let response = agent.prompt(prompt).await.map_err(|e| {
         let msg = e.to_string();
-        classify_rig_error(&msg, model, endpoint, "Is Ollama running?")
+        classify_rig_error(&msg, model, endpoint, "Is Ollama running?", None)
     })?;
 
     Ok(response)
@@ -284,7 +332,7 @@ async fn call_openai(
     let response = agent.prompt(prompt).await.map_err(|e| {
         let msg = e.to_string();
         debug!(raw_error = %msg, "openai prompt failed");
-        classify_rig_error(&msg, model, endpoint, "Check the endpoint URL.")
+        classify_rig_error(&msg, model, endpoint, "Check the endpoint URL.", None)
     })?;
 
     Ok(response)
@@ -296,6 +344,8 @@ async fn call_openai(
     trtllm.architecture = entry.architecture.as_deref().unwrap_or(""),
     trtllm.quant = entry.quant.as_deref().unwrap_or(""),
     trtllm.expected_vram_gb = entry.expected_vram_gb.unwrap_or(0),
+    gen_ai.usage.input_tokens = tracing::field::Empty,
+    gen_ai.usage.output_tokens = tracing::field::Empty,
 ))]
 async fn call_trtllm(
     entry: &mv_core::ModelEntry,
@@ -339,27 +389,195 @@ async fn call_trtllm(
             hint: trtllm_hint.clone(),
         })?;
 
-    let agent = client
+    let mut builder = client
         .agent(model_name)
         .preamble(SYSTEM_PREAMBLE)
         .tool_server_handle(handle)
-        .default_max_turns(10)
-        .build();
+        .default_max_turns(10);
+    if let Some(stop_value) = mv_core::trtllm::stop::request_stop_value(entry) {
+        builder = builder.additional_params(stop_value);
+    }
+    let agent = builder.build();
 
     info!("sending prompt to model");
-    let response = agent.prompt(prompt).await.map_err(|e| {
+    let response = agent.prompt(prompt).extended_details().await.map_err(|e| {
         let msg = e.to_string();
         debug!(raw_error = %msg, "trtllm prompt failed");
-        classify_rig_error(&msg, model_name, endpoint, &trtllm_hint)
+        classify_rig_error(&msg, model_name, endpoint, &trtllm_hint, Some(&entry.id))
     })?;
 
-    Ok(response)
+    let usage = response.usage;
+    if usage.input_tokens != 0 || usage.output_tokens != 0 {
+        let span = tracing::Span::current();
+        span.record("gen_ai.usage.input_tokens", usage.input_tokens);
+        span.record("gen_ai.usage.output_tokens", usage.output_tokens);
+    }
+
+    Ok(response.output)
 }
 
-fn classify_rig_error(msg: &str, model: &str, endpoint: &str, hint: &str) -> mv_core::MvError {
-    if msg.contains("not found") || (msg.contains("model") && msg.contains("pull")) {
-        mv_core::MvError::ModelNotFound {
-            model: model.to_string(),
+#[tracing::instrument(name = "llm_completion", skip(handle), fields(
+    gen_ai.system = "trtllm",
+    gen_ai.request.model = %entry.model_name(),
+    trtllm.architecture = entry.architecture.as_deref().unwrap_or(""),
+    trtllm.quant = entry.quant.as_deref().unwrap_or(""),
+    trtllm.expected_vram_gb = entry.expected_vram_gb.unwrap_or(0),
+    gen_ai.usage.input_tokens = tracing::field::Empty,
+    gen_ai.usage.output_tokens = tracing::field::Empty,
+))]
+async fn stream_trtllm(
+    entry: &mv_core::ModelEntry,
+    endpoint: &str,
+    prompt: &str,
+    handle: ToolServerHandle,
+) -> Result<String, mv_core::MvError> {
+    use futures_util::StreamExt;
+    use rig::agent::{MultiTurnStreamItem, Text};
+    use rig::client::CompletionClient;
+    use rig::streaming::StreamedAssistantContent;
+    use std::io::Write as _;
+
+    let trtllm_hint = "Start the server with: trtllm-serve <model-path>".to_string();
+
+    let health = mv_core::trtllm::health::check_health(endpoint).await;
+    match health {
+        mv_core::trtllm::health::HealthCheckResult::Healthy => {}
+        mv_core::trtllm::health::HealthCheckResult::Unhealthy { status, body } => {
+            return Err(mv_core::MvError::BackendUnreachable {
+                endpoint: endpoint.to_string(),
+                hint: format!("Server returned {status}: {body}. {trtllm_hint}"),
+            });
+        }
+        mv_core::trtllm::health::HealthCheckResult::Unreachable { error } => {
+            return Err(mv_core::MvError::BackendUnreachable {
+                endpoint: endpoint.to_string(),
+                hint: format!("TRT-LLM server not reachable ({error}). {trtllm_hint}"),
+            });
+        }
+    }
+
+    let model_name = entry.model_name();
+    info!(model = %model_name, endpoint = %endpoint, locality = "local", "streaming from TRT-LLM");
+
+    // Preflight the served-model list. rig's streaming layer swallows a proxy
+    // 502 (logs an SSE parse error, ends the turn empty), so an unloaded model
+    // would otherwise yield silent empty output and exit 0. Only treat a
+    // definitive "not served" as an error; an indeterminate preflight (None)
+    // falls through to the stream attempt.
+    if mv_core::trtllm::health::served_model_present(endpoint, model_name).await == Some(false) {
+        return Err(mv_core::MvError::ModelNotLoaded {
+            model: entry.id.clone(),
+            hint: format!("Run: just load {}", entry.id),
+        });
+    }
+
+    let client = rig::providers::openai::CompletionsClient::builder()
+        .api_key("tensorrt_llm")
+        .base_url(endpoint)
+        .build()
+        .map_err(|e| mv_core::MvError::BackendUnreachable {
+            endpoint: format!("{endpoint}: {e}"),
+            hint: trtllm_hint.clone(),
+        })?;
+
+    let mut builder = client
+        .agent(model_name)
+        .preamble(SYSTEM_PREAMBLE)
+        .tool_server_handle(handle)
+        .default_max_turns(10);
+    if let Some(stop_value) = mv_core::trtllm::stop::request_stop_value(entry) {
+        builder = builder.additional_params(stop_value);
+    }
+    let agent = builder.build();
+
+    info!("sending prompt to model");
+    use rig::streaming::StreamingPrompt as _;
+    let mut response_stream = agent.stream_prompt(prompt).multi_turn(10).await;
+
+    let stdout = std::io::stdout();
+    let mut accumulator = String::new();
+    let mut stream_err: Option<mv_core::MvError> = None;
+
+    loop {
+        let Some(chunk) = response_stream.next().await else {
+            break;
+        };
+        match chunk {
+            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
+                Text { text },
+            ))) => {
+                let mut handle = stdout.lock();
+                if let Err(e) = handle
+                    .write_all(text.as_bytes())
+                    .and_then(|_| handle.flush())
+                {
+                    stream_err = Some(mv_core::MvError::CompletionFailed {
+                        details: format!("stdout write failed: {e}"),
+                    });
+                    break;
+                }
+                accumulator.push_str(&text);
+            }
+            Ok(MultiTurnStreamItem::FinalResponse(final_response)) => {
+                let usage = final_response.usage();
+                if usage.input_tokens != 0 || usage.output_tokens != 0 {
+                    let span = tracing::Span::current();
+                    span.record("gen_ai.usage.input_tokens", usage.input_tokens);
+                    span.record("gen_ai.usage.output_tokens", usage.output_tokens);
+                }
+            }
+            Ok(_) => continue,
+            Err(e) => {
+                let msg = e.to_string();
+                debug!(raw_error = %msg, "trtllm stream failed");
+                stream_err = Some(classify_rig_error(
+                    &msg,
+                    model_name,
+                    endpoint,
+                    &trtllm_hint,
+                    Some(&entry.id),
+                ));
+                break;
+            }
+        }
+    }
+
+    if let Some(err) = stream_err {
+        // Leave any partial output already written to stdout intact.
+        return Err(err);
+    }
+
+    // Trailing newline after clean termination.
+    let mut handle = stdout.lock();
+    let _ = handle.write_all(b"\n");
+    let _ = handle.flush();
+
+    info!(len = accumulator.len(), "stream complete");
+    // Caller's print_success will print an empty string; the stream itself
+    // already wrote the full body + trailing newline to stdout.
+    Ok(String::new())
+}
+
+fn classify_rig_error(
+    msg: &str,
+    model: &str,
+    endpoint: &str,
+    hint: &str,
+    trtllm_load_id: Option<&str>,
+) -> mv_core::MvError {
+    // Order matters. The TRT-LLM 502 → not-loaded mapping is checked FIRST:
+    // rig surfaces a live-proxy 502 as a string that also contains "HttpError"
+    // (the BackendUnreachable branch) and Triton's "...is not found" (the
+    // ModelNotFound branch), so either would otherwise shadow it and swallow
+    // US2's `just load` hint. This is safe for the connection-refused case
+    // (US2 scenario 3): a genuine refusal carries no "502", so it falls
+    // through to BackendUnreachable below.
+    if let Some(id) = trtllm_load_id
+        && msg.contains("502")
+    {
+        mv_core::MvError::ModelNotLoaded {
+            model: id.to_string(),
+            hint: format!("Run: just load {id}"),
         }
     } else if msg.contains("connection")
         || msg.contains("Connection")
@@ -371,6 +589,10 @@ fn classify_rig_error(msg: &str, model: &str, endpoint: &str, hint: &str) -> mv_
         mv_core::MvError::BackendUnreachable {
             endpoint: endpoint.to_string(),
             hint: hint.to_string(),
+        }
+    } else if msg.contains("not found") || (msg.contains("model") && msg.contains("pull")) {
+        mv_core::MvError::ModelNotFound {
+            model: model.to_string(),
         }
     } else {
         mv_core::MvError::CompletionFailed {
@@ -408,8 +630,19 @@ fn init_tracing(verbose: u8, otlp_endpoint: Option<&str>) {
         }
     };
 
+    // Only colourise when stderr is a real terminal. Piped/redirected logs
+    // (e.g. captured by tests or written to a file) then stay plain text —
+    // ANSI escapes between a field name and its `=` otherwise corrupt both
+    // log files and substring matches over the output.
+    use std::io::IsTerminal as _;
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
+        .with_span_events(if verbose >= 2 {
+            tracing_subscriber::fmt::format::FmtSpan::CLOSE
+        } else {
+            tracing_subscriber::fmt::format::FmtSpan::NONE
+        })
         .with_filter(console_filter);
 
     let otel_layer = otlp_endpoint.and_then(|endpoint| match init_otel_layer(endpoint) {
@@ -506,13 +739,23 @@ async fn main() {
     init_tracing(cli.verbose, cli.otlp.as_deref());
 
     let result = match &cli.command {
-        Some(Commands::Prompt(args)) => match run_prompt(args, cli.json).await {
-            Ok(response) => {
-                print_success(&response, cli.json);
-                Ok(())
+        Some(Commands::Prompt(args)) => {
+            let effective_stream = if args.stream && cli.json {
+                eprintln!(
+                    "warning: --json overrides --stream; falling back to buffered JSON output"
+                );
+                false
+            } else {
+                args.stream
+            };
+            match run_prompt(args, cli.json, effective_stream).await {
+                Ok(response) => {
+                    print_success(&response, cli.json);
+                    Ok(())
+                }
+                Err(err) => Err(err),
             }
-            Err(err) => Err(err),
-        },
+        }
         None => {
             // No subcommand and no prompt — show help
             eprintln!("Error: no prompt provided. Use: mv-cli <PROMPT> or mv-cli prompt <PROMPT>");
@@ -696,5 +939,70 @@ impl mv_core::workflow::engine::ToolExecutor for NoopToolExecutor {
             step: String::new(),
             details: format!("tool execution not yet implemented for '{tool_name}'"),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_rig_error_502_maps_to_model_not_loaded() {
+        let err = classify_rig_error(
+            "HTTP error: status code: 502 Bad Gateway",
+            "llama-fp8",
+            "http://localhost:8003/v1",
+            "Start the server with: trtllm-serve <model-path>",
+            Some("llama-fp8"),
+        );
+        match err {
+            mv_core::MvError::ModelNotLoaded { model, hint } => {
+                assert_eq!(model, "llama-fp8");
+                assert_eq!(hint, "Run: just load llama-fp8");
+            }
+            other => panic!("expected ModelNotLoaded, got: {other:?}"),
+        }
+    }
+
+    // Regression: this is the verbatim error rig surfaces from the live proxy
+    // on a 502. It contains "HttpError" (matches the BackendUnreachable branch)
+    // AND "...is not found" (matches the ModelNotFound branch) AND "502". The
+    // TRT-LLM 502 → ModelNotLoaded mapping must win over both, or US2's
+    // `just load` hint never fires against the real proxy.
+    #[test]
+    fn classify_rig_error_502_with_not_found_body_maps_to_model_not_loaded() {
+        let err = classify_rig_error(
+            "CompletionError: HttpError: Invalid status code 502 Bad Gateway \
+             with message: {\"detail\":\"Triton returned HTTP 404: \
+             {\\\"error\\\":\\\"Request for unknown model: 'ensemble_llama-fp8' \
+             is not found\\\"}\"}",
+            "llama-fp8",
+            "http://localhost:8003/v1",
+            "Start the server with: trtllm-serve <model-path>",
+            Some("llama-fp8"),
+        );
+        match err {
+            mv_core::MvError::ModelNotLoaded { model, hint } => {
+                assert_eq!(model, "llama-fp8");
+                assert_eq!(hint, "Run: just load llama-fp8");
+            }
+            other => panic!("expected ModelNotLoaded, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_rig_error_500_does_not_map_to_model_not_loaded() {
+        let err = classify_rig_error(
+            "HTTP error: status code: 500 Internal Server Error",
+            "llama-fp8",
+            "http://localhost:8003/v1",
+            "Start the server with: trtllm-serve <model-path>",
+            Some("llama-fp8"),
+        );
+        assert!(
+            !matches!(err, mv_core::MvError::ModelNotLoaded { .. }),
+            "500 must not map to ModelNotLoaded, got: {err:?}"
+        );
+        assert!(matches!(err, mv_core::MvError::CompletionFailed { .. }));
     }
 }

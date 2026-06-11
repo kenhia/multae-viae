@@ -50,6 +50,8 @@ pub struct ModelEntry {
     pub architecture: Option<String>,
     pub quant: Option<String>,
     pub expected_vram_gb: Option<u32>,
+    /// Optional per-model stop sequences forwarded to the proxy.
+    pub stop_sequences: Option<Vec<String>>,
 }
 
 impl ModelEntry {
@@ -75,6 +77,19 @@ impl ModelEntry {
     /// Model name sent to the API — `served_name` if set, otherwise `id`.
     pub fn model_name(&self) -> &str {
         self.served_name.as_deref().unwrap_or(&self.id)
+    }
+
+    /// Effective stop sequences for this model: the explicit list if set,
+    /// otherwise the TRT-LLM provider default for `provider == "trtllm"`,
+    /// otherwise `None`.
+    pub fn effective_stop_sequences(&self) -> Option<Vec<String>> {
+        if let Some(seq) = &self.stop_sequences {
+            return Some(seq.clone());
+        }
+        if self.provider == "trtllm" {
+            return Some(trtllm::stop::default_stop_sequences());
+        }
+        None
     }
 }
 
@@ -150,6 +165,7 @@ impl ModelRegistry {
                 architecture: None,
                 quant: None,
                 expected_vram_gb: None,
+                stop_sequences: None,
             }],
         }
     }
@@ -178,6 +194,12 @@ pub enum MvError {
 
     #[error("Model '{model}' not found. Run: ollama pull {model}")]
     ModelNotFound { model: String },
+
+    #[error("Model '{model}' is not loaded on the TRT-LLM proxy. {hint}")]
+    ModelNotLoaded { model: String, hint: String },
+
+    #[error("streaming is only supported for TRT-LLM models in this release")]
+    StreamingNotSupported,
 
     #[error("Model returned an error: {details}")]
     CompletionFailed { details: String },
@@ -484,6 +506,7 @@ models:
             architecture: None,
             quant: None,
             expected_vram_gb: None,
+            stop_sequences: None,
         };
         assert_eq!(entry.locality(), Locality::Local);
     }
@@ -501,6 +524,7 @@ models:
             architecture: None,
             quant: None,
             expected_vram_gb: None,
+            stop_sequences: None,
         };
         assert_eq!(ollama.endpoint(), "http://localhost:11434");
 
@@ -515,6 +539,7 @@ models:
             architecture: None,
             quant: None,
             expected_vram_gb: None,
+            stop_sequences: None,
         };
         assert_eq!(openai.endpoint(), "https://api.openai.com/v1");
     }
@@ -550,6 +575,7 @@ models:
             architecture: None,
             quant: None,
             expected_vram_gb: None,
+            stop_sequences: None,
         };
         assert_eq!(entry.endpoint(), "http://localhost:8003/v1");
     }
@@ -567,6 +593,7 @@ models:
             architecture: None,
             quant: None,
             expected_vram_gb: None,
+            stop_sequences: None,
         };
         assert_eq!(entry.model_name(), "meta-llama/Meta-Llama-3.1-8B-Instruct");
     }
@@ -584,6 +611,7 @@ models:
             architecture: None,
             quant: None,
             expected_vram_gb: None,
+            stop_sequences: None,
         };
         assert_eq!(entry.model_name(), "llama-fp8");
     }
@@ -629,5 +657,61 @@ models:
         assert!(entry.quant.is_none());
         assert!(entry.expected_vram_gb.is_none());
         assert_eq!(entry.model_name(), "llama-3_1-8b-fp8");
+    }
+
+    #[test]
+    fn error_model_not_loaded_message() {
+        let err = MvError::ModelNotLoaded {
+            model: "llama-3_1-8b-fp8".to_string(),
+            hint: "Run: just up".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Model 'llama-3_1-8b-fp8' is not loaded on the TRT-LLM proxy. Run: just up"
+        );
+    }
+
+    #[test]
+    fn effective_stop_sequences_explicit_list() {
+        let yaml = r#"
+models:
+  - id: llama-3_1-8b-fp8
+    provider: trtllm
+    stop_sequences:
+      - "<|eot_id|>"
+"#;
+        let registry = ModelRegistry::from_yaml(yaml, "test").unwrap();
+        let entry = registry.get("llama-3_1-8b-fp8").unwrap();
+        assert_eq!(
+            entry.effective_stop_sequences(),
+            Some(vec!["<|eot_id|>".to_string()])
+        );
+    }
+
+    #[test]
+    fn effective_stop_sequences_default_for_trtllm() {
+        let yaml = r#"
+models:
+  - id: llama-3_1-8b-fp8
+    provider: trtllm
+"#;
+        let registry = ModelRegistry::from_yaml(yaml, "test").unwrap();
+        let entry = registry.get("llama-3_1-8b-fp8").unwrap();
+        assert_eq!(
+            entry.effective_stop_sequences(),
+            Some(crate::trtllm::stop::default_stop_sequences())
+        );
+    }
+
+    #[test]
+    fn effective_stop_sequences_none_for_non_trtllm() {
+        let yaml = r#"
+models:
+  - id: qwen3:4b
+    provider: ollama
+"#;
+        let registry = ModelRegistry::from_yaml(yaml, "test").unwrap();
+        let entry = registry.get("qwen3:4b").unwrap();
+        assert!(entry.effective_stop_sequences().is_none());
     }
 }

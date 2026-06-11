@@ -163,24 +163,37 @@ The trt-llm-explore proxy now supports SSE streaming, tool calling, and
 approximate token counts. This phase adds client-side support.
 
 ### Tasks
-- [ ] Add streaming support for trtllm provider (`stream_prompt()` using
+- [x] Add streaming support for trtllm provider (`stream_prompt()` using
   Rig's SSE streaming with `CompletionsClient`)
-- [ ] Surface token usage from TRT-LLM responses in telemetry spans
+- [x] Surface token usage from TRT-LLM responses in telemetry spans
   (`gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`)
-- [ ] Integration-test tool calling through TRT-LLM (verify agent can call
+- [x] Integration-test tool calling through TRT-LLM (verify agent can call
   built-in tools like `file_list` via the proxy)
-- [ ] Add `--stream` CLI flag for interactive streaming output
-- [ ] Improve error messages when model is not loaded (proxy returns 502 →
+- [x] Add `--stream` CLI flag for interactive streaming output
+- [x] Improve error messages when model is not loaded (proxy returns 502 →
   detect and suggest `just load <model>`)
-- [ ] Configure proper stop sequences per provider to prevent runaway
+- [x] Configure proper stop sequences per provider to prevent runaway
   generation (test against all models in TRT-LLM registry)
-- [ ] End-to-end test: workflow with TRT-LLM model step
+- [x] End-to-end test: workflow with TRT-LLM model step
 
 ### Deliverable
 ```bash
-$ cargo run -p mv-cli -- -m llama-fp8 --stream "Explain Rust ownership"
+$ cargo run -p mv-cli -- -m llama-fp8 --stream --no-tools "Explain Rust ownership"
 # → Tokens stream to terminal as they arrive from TRT-LLM
 ```
+
+> `--no-tools` is required for genuine streaming: the TRT-LLM proxy streams
+> tool calls as plain text, so with tools attached `--stream` falls back to
+> buffered output. See [TRT-LLM Integration](11-trt-llm-integration.md).
+
+### Lessons Learned
+- The proxy's 502 body wraps Triton's `"...is not found"` (and rig surfaces
+  it as `HttpError`), which shadowed the `502 → ModelNotLoaded` mapping —
+  the `just load` hint never fired live until the classifier was reordered.
+- rig's streaming layer swallows a 502 (logs an SSE parse error, ends empty),
+  so the streaming path needs a `/v1/models` preflight to surface the hint.
+- The proxy streams tool calls as text, not `tool_calls` — streaming + tools
+  can't round-trip, hence the `--no-tools` design.
 
 ---
 
