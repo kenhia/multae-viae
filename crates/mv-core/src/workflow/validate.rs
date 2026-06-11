@@ -49,6 +49,9 @@ pub enum ValidationError {
         step_id: String,
         details: String,
     },
+    EmptyParallel {
+        step_id: String,
+    },
 }
 
 impl std::fmt::Display for ValidationError {
@@ -108,6 +111,9 @@ impl std::fmt::Display for ValidationError {
                     f,
                     "branch step '{step_id}' condition syntax error: {details}"
                 )
+            }
+            Self::EmptyParallel { step_id } => {
+                write!(f, "parallel step '{step_id}' has no child steps")
             }
         }
     }
@@ -169,9 +175,13 @@ pub fn validate(workflow: &Workflow, workflow_dir: Option<&Path>) -> Vec<Validat
 fn collect_step_ids<'a>(steps: &'a [Step], out: &mut Vec<&'a str>) {
     for step in steps {
         out.push(step.id());
-        if let Step::Branch(bs) = step {
-            collect_step_ids(&bs.then, out);
-            collect_step_ids(&bs.otherwise, out);
+        match step {
+            Step::Branch(bs) => {
+                collect_step_ids(&bs.then, out);
+                collect_step_ids(&bs.otherwise, out);
+            }
+            Step::Parallel(par) => collect_step_ids(&par.steps, out),
+            _ => {}
         }
     }
 }
@@ -318,6 +328,43 @@ fn validate_steps(
                 for name in then_def.intersection(&else_def) {
                     available.insert(name.clone());
                     defined_here.insert(name.clone());
+                }
+            }
+            Step::Parallel(par) => {
+                if par.steps.is_empty() {
+                    errors.push(ValidationError::EmptyParallel {
+                        step_id: par.id.clone(),
+                    });
+                }
+
+                // Every child validates against the pre-fork context only —
+                // siblings are invisible to each other by construction.
+                let mut produced: HashSet<String> = HashSet::new();
+                for child in &par.steps {
+                    let child_def = validate_steps(
+                        std::slice::from_ref(child),
+                        &available,
+                        input_names,
+                        workflow_dir,
+                        errors,
+                    );
+                    // Children's outputs must be disjoint — at the join two
+                    // children writing the same name would race.
+                    for name in child_def {
+                        if !produced.insert(name.clone()) {
+                            errors.push(ValidationError::DuplicateOutputName {
+                                output_name: name,
+                                step_id: child.id().to_string(),
+                            });
+                        }
+                    }
+                }
+
+                // All children run, so every produced output is definitely
+                // available after the join.
+                for name in produced {
+                    available.insert(name.clone());
+                    defined_here.insert(name);
                 }
             }
         }
@@ -1110,6 +1157,176 @@ steps:
             )),
             "got: {errors:?}"
         );
+    }
+
+    // --- 009/WS4: parallel validation ---
+
+    #[test]
+    fn parallel_disjoint_outputs_valid() {
+        let yaml = r#"
+name: test
+version: "1.0"
+inputs:
+  - name: topic
+    type: string
+steps:
+  - id: fan
+    type: parallel
+    steps:
+      - id: a
+        type: prompt
+        output: out_a
+        template: "A {{topic}}"
+      - id: b
+        type: prompt
+        output: out_b
+        template: "B {{topic}}"
+  - id: combine
+    type: prompt
+    output: final
+    template: "{{out_a}} {{out_b}}"
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        assert!(validate(&wf, None).is_empty(), "{:?}", validate(&wf, None));
+    }
+
+    #[test]
+    fn parallel_sibling_output_not_visible() {
+        // Child `b` references `out_a` (a sibling's output) — invisible by
+        // construction (each child sees only the pre-fork context).
+        let yaml = r#"
+name: test
+version: "1.0"
+inputs:
+  - name: topic
+    type: string
+steps:
+  - id: fan
+    type: parallel
+    steps:
+      - id: a
+        type: prompt
+        output: out_a
+        template: "A {{topic}}"
+      - id: b
+        type: prompt
+        output: out_b
+        template: "B {{out_a}}"
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let errors = validate(&wf, None);
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::UnresolvableReference { step_id, reference }
+                    if step_id == "b" && reference == "out_a"
+            )),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn parallel_duplicate_child_output_rejected() {
+        let yaml = r#"
+name: test
+version: "1.0"
+steps:
+  - id: fan
+    type: parallel
+    steps:
+      - id: a
+        type: prompt
+        output: same
+        template: "A"
+      - id: b
+        type: prompt
+        output: same
+        template: "B"
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let errors = validate(&wf, None);
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::DuplicateOutputName { output_name, step_id }
+                    if output_name == "same" && step_id == "b"
+            )),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn parallel_outputs_available_after_join() {
+        // Unlike a branch (intersection), ALL parallel children run, so every
+        // child output is available afterwards.
+        let yaml = r#"
+name: test
+version: "1.0"
+steps:
+  - id: fan
+    type: parallel
+    steps:
+      - id: a
+        type: prompt
+        output: out_a
+        template: "A"
+      - id: b
+        type: prompt
+        output: out_b
+        template: "B"
+  - id: use_a
+    type: prompt
+    output: c
+    template: "{{out_a}}"
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        assert!(validate(&wf, None).is_empty(), "{:?}", validate(&wf, None));
+    }
+
+    #[test]
+    fn parallel_empty_rejected() {
+        let yaml = r#"
+name: test
+version: "1.0"
+steps:
+  - id: fan
+    type: parallel
+    steps: []
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let errors = validate(&wf, None);
+        assert!(
+            errors.iter().any(
+                |e| matches!(e, ValidationError::EmptyParallel { step_id } if step_id == "fan")
+            ),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn parallel_child_can_reference_prior_output() {
+        let yaml = r#"
+name: test
+version: "1.0"
+steps:
+  - id: setup
+    type: prompt
+    output: base
+    template: "base"
+  - id: fan
+    type: parallel
+    steps:
+      - id: a
+        type: prompt
+        output: out_a
+        template: "A {{base}}"
+      - id: b
+        type: prompt
+        output: out_b
+        template: "B {{base}}"
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        assert!(validate(&wf, None).is_empty(), "{:?}", validate(&wf, None));
     }
 
     #[test]

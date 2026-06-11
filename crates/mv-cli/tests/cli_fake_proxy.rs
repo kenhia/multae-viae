@@ -390,6 +390,82 @@ fn branch_workflow_takes_else_arm() {
     );
 }
 
+// --- 009/WS4 (T018): parallel workflow end-to-end through the CLI ---
+
+#[test]
+fn parallel_workflow_runs_children_and_merges() {
+    let s = setup();
+    s.proxy.mount_health_ok();
+    s.proxy.mount_chat_text("PIECE");
+
+    let wf_path = s.dir.path().join("parallel.yaml");
+    std::fs::write(
+        &wf_path,
+        format!(
+            r#"
+name: parallel-e2e
+version: "1.0"
+defaults:
+  model: {MODEL_ID}
+inputs:
+  - name: topic
+    type: string
+    required: true
+steps:
+  - id: fan
+    type: parallel
+    steps:
+      - id: a
+        type: prompt
+        output: out_a
+        template: "Angle A on {{{{topic}}}}"
+      - id: b
+        type: prompt
+        output: out_b
+        template: "Angle B on {{{{topic}}}}"
+  - id: combine
+    type: prompt
+    output: merged
+    template: "Combine: {{{{out_a}}}} + {{{{out_b}}}}"
+outputs:
+  - name: result
+    from: combine
+"#
+        ),
+    )
+    .unwrap();
+
+    cmd()
+        .current_dir(s.dir.path())
+        .args([
+            "workflow",
+            "run",
+            wf_path.to_str().unwrap(),
+            "--config",
+            s.config.to_str().unwrap(),
+            "--input",
+            "topic=rust",
+        ])
+        .assert()
+        .success();
+
+    let bodies = s.proxy.chat_request_bodies();
+    // Two parallel children + the combine step.
+    assert_eq!(
+        bodies.len(),
+        3,
+        "expected 2 children + combine, got {}",
+        bodies.len()
+    );
+
+    // The combine step ran last and saw both merged outputs (both "PIECE").
+    let combine = serde_json::to_string(bodies.last().unwrap()).unwrap();
+    assert!(
+        combine.contains("Combine: PIECE + PIECE"),
+        "combine step should see both parallel outputs: {combine}"
+    );
+}
+
 // --- T029: end-to-end 3-step workflow (tool → prompt → transform) ---
 
 #[test]

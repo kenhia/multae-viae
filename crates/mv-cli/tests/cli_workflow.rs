@@ -129,6 +129,19 @@ fn shipped_branch_example_validates() {
         .stdout(predicate::str::contains("valid"));
 }
 
+#[test]
+fn shipped_parallel_example_validates() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../workflows/examples/parallel-example.yaml"
+    );
+    cmd()
+        .args(["workflow", "validate", path])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("valid"));
+}
+
 // --- 008/F2: workflow tool steps execute real built-in tools ---
 
 #[test]

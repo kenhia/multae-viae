@@ -395,6 +395,13 @@ pub enum MvError {
 
     #[error("step '{step}': template error: {details}")]
     WorkflowTemplateError { step: String, details: String },
+
+    #[error("parallel step '{step}': {} child step(s) failed:\n{}", .failures.len(), format_chain_attempts(.failures))]
+    WorkflowParallelFailed {
+        step: String,
+        /// `(child_step_id, failure message)` pairs, one per failed child.
+        failures: Vec<(String, String)>,
+    },
 }
 
 /// Render the per-attempt failure list for [`MvError::AllModelsFailed`] as one

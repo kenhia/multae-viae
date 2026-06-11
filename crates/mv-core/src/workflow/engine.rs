@@ -13,9 +13,10 @@ pub use super::transform::execute_transform;
 
 /// Trait for executing prompt steps — enables mocking in tests.
 ///
-/// Methods return `Send` futures and implementors are `Send + Sync` so step
-/// execution can be moved onto worker tasks (the Phase 5 `parallel` step
-/// type spawns arms with `tokio::spawn`).
+/// Methods return `Send` futures and implementors are `Send + Sync`; the
+/// `parallel` step type runs children concurrently with
+/// `futures::future::join_all` on the current task (no `tokio::spawn`, so no
+/// `'static` bound on the executor borrows).
 pub trait PromptExecutor: Send + Sync {
     fn execute_prompt(
         &self,
@@ -72,10 +73,20 @@ impl ExecutionContext {
         vars
     }
 
-    /// Immutable copy of the current state. Parallel arms will each receive
-    /// a snapshot taken at the fork, never a shared mutable context.
+    /// Immutable copy of the current state. Parallel children each receive a
+    /// snapshot taken at the fork, never a shared mutable context.
     pub fn snapshot(&self) -> Self {
         self.clone()
+    }
+
+    /// Outputs present here but not in `base` — the new outputs a parallel
+    /// child produced on top of its fork snapshot, for merging at the join.
+    pub fn outputs_added_since(&self, base: &ExecutionContext) -> Vec<(String, String)> {
+        self.outputs
+            .iter()
+            .filter(|(name, _)| !base.outputs.contains_key(*name))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect()
     }
 }
 
@@ -318,6 +329,52 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
             ))
             .await?;
         }
+        Step::Parallel(par) => {
+            // Fork: each child runs against an immutable snapshot taken now, so
+            // siblings never observe each other's outputs.
+            let snapshot = ctx.snapshot();
+            let child_futures = par.steps.iter().map(|child| {
+                let mut child_ctx = snapshot.clone();
+                async move {
+                    Box::pin(execute_steps(
+                        std::slice::from_ref(child),
+                        &mut child_ctx,
+                        defaults,
+                        prompt_executor,
+                        tool_executor,
+                        workflow_dir,
+                    ))
+                    .await
+                    .map(|()| child_ctx)
+                }
+            });
+
+            // Join: run every child to completion (no early abort — partial
+            // side effects must not be scheduling-dependent).
+            let results = futures::future::join_all(child_futures).await;
+
+            let mut failures: Vec<(String, String)> = Vec::new();
+            for (child, result) in par.steps.iter().zip(results.iter()) {
+                if let Err(e) = result {
+                    failures.push((child.id().to_string(), e.to_string()));
+                }
+            }
+            if !failures.is_empty() {
+                return Err(MvError::WorkflowParallelFailed {
+                    step: par.id.clone(),
+                    failures,
+                });
+            }
+
+            // Merge each child's new outputs back into the parent context, in
+            // declaration order (outputs are validated disjoint, so order only
+            // affects determinism, not correctness).
+            for child_ctx in results.into_iter().map(Result::unwrap) {
+                for (name, value) in child_ctx.outputs_added_since(&snapshot) {
+                    ctx.insert_output(name, value);
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -360,6 +417,7 @@ fn step_type_name(step: &Step) -> &'static str {
         Step::Tool(_) => "tool",
         Step::Transform(_) => "transform",
         Step::Branch(_) => "branch",
+        Step::Parallel(_) => "parallel",
     }
 }
 
@@ -370,13 +428,21 @@ fn find_step_by_id<'a>(steps: &'a [Step], id: &str) -> Option<&'a Step> {
         if step.id() == id {
             return Some(step);
         }
-        if let Step::Branch(bs) = step {
-            if let Some(found) = find_step_by_id(&bs.then, id) {
-                return Some(found);
+        match step {
+            Step::Branch(bs) => {
+                if let Some(found) = find_step_by_id(&bs.then, id) {
+                    return Some(found);
+                }
+                if let Some(found) = find_step_by_id(&bs.otherwise, id) {
+                    return Some(found);
+                }
             }
-            if let Some(found) = find_step_by_id(&bs.otherwise, id) {
-                return Some(found);
+            Step::Parallel(par) => {
+                if let Some(found) = find_step_by_id(&par.steps, id) {
+                    return Some(found);
+                }
             }
+            _ => {}
         }
     }
     None
@@ -1377,6 +1443,188 @@ outputs:
         assert_eq!(calls[0].0, "both yes");
         assert_eq!(calls[1].0, "Got INNER");
         assert_eq!(result.outputs["result"], "used");
+    }
+
+    // --- 009/WS4: parallel execution ---
+
+    #[tokio::test]
+    async fn parallel_runs_all_children_and_merges_outputs() {
+        let yaml = r#"
+name: parallel-merge
+version: "1.0"
+inputs:
+  - name: topic
+    type: string
+    required: true
+steps:
+  - id: fan
+    type: parallel
+    steps:
+      - id: a
+        type: prompt
+        output: out_a
+        template: "A: {{topic}}"
+      - id: b
+        type: prompt
+        output: out_b
+        template: "B: {{topic}}"
+  - id: combine
+    type: prompt
+    output: final
+    template: "{{out_a}} | {{out_b}}"
+outputs:
+  - name: result
+    from: combine
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        // Children run concurrently; the mock returns responses in call order,
+        // which is non-deterministic, so make both arms return the same marker
+        // to keep the assertion order-independent.
+        let prompt_exec = MockPromptExecutor::new(vec!["RA", "RB", "combined"]);
+        let tool_exec = MockToolExecutor::always_ok("");
+        let inputs = [("topic".to_string(), "x".to_string())]
+            .into_iter()
+            .collect();
+
+        let result = execute_workflow(
+            &wf,
+            inputs,
+            &prompt_exec,
+            &tool_exec,
+            Path::new("."),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap();
+
+        // Both children ran plus the combine step.
+        assert_eq!(prompt_exec.call_count(), 3);
+        // The combine step saw both merged outputs (order of RA/RB may vary).
+        let combine_prompt = &prompt_exec.calls()[2].0;
+        assert!(
+            combine_prompt.contains("RA") && combine_prompt.contains("RB"),
+            "combine should see both parallel outputs, got: {combine_prompt}"
+        );
+        assert_eq!(result.outputs["result"], "combined");
+    }
+
+    #[tokio::test]
+    async fn parallel_aggregates_all_child_failures() {
+        let yaml = r#"
+name: parallel-fail
+version: "1.0"
+steps:
+  - id: fan
+    type: parallel
+    steps:
+      - id: a
+        type: prompt
+        output: out_a
+        template: "A"
+      - id: b
+        type: prompt
+        output: out_b
+        template: "B"
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        // No mock responses → every prompt call fails.
+        let prompt_exec = MockPromptExecutor::new(vec![]);
+        let tool_exec = MockToolExecutor::always_ok("");
+
+        let err = execute_workflow(
+            &wf,
+            HashMap::new(),
+            &prompt_exec,
+            &tool_exec,
+            Path::new("."),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap_err();
+
+        match err {
+            MvError::WorkflowParallelFailed { step, failures } => {
+                assert_eq!(step, "fan");
+                // Both children ran to completion and both failures reported.
+                assert_eq!(failures.len(), 2, "got: {failures:?}");
+                let ids: Vec<&str> = failures.iter().map(|(id, _)| id.as_str()).collect();
+                assert!(ids.contains(&"a") && ids.contains(&"b"), "got: {ids:?}");
+            }
+            other => panic!("expected WorkflowParallelFailed, got: {other:?}"),
+        }
+    }
+
+    /// Prompt executor whose calls rendezvous on a shared barrier: each call
+    /// blocks until `n` calls are in flight. If the engine ran children
+    /// sequentially, the first call would block forever — so completing within
+    /// the timeout proves genuine concurrency.
+    struct RendezvousExecutor {
+        barrier: std::sync::Arc<tokio::sync::Barrier>,
+    }
+
+    impl PromptExecutor for RendezvousExecutor {
+        async fn execute_prompt(
+            &self,
+            prompt_text: &str,
+            _model: &str,
+            _temperature: Option<f64>,
+            _max_tokens: Option<u64>,
+        ) -> Result<String, MvError> {
+            self.barrier.wait().await;
+            Ok(prompt_text.to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_children_run_concurrently() {
+        let yaml = r#"
+name: rendezvous
+version: "1.0"
+steps:
+  - id: fan
+    type: parallel
+    steps:
+      - id: a
+        type: prompt
+        output: out_a
+        template: "A"
+      - id: b
+        type: prompt
+        output: out_b
+        template: "B"
+      - id: c
+        type: prompt
+        output: out_c
+        template: "C"
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        // Barrier of 3: all three children must be in flight simultaneously.
+        let prompt_exec = RendezvousExecutor {
+            barrier: std::sync::Arc::new(tokio::sync::Barrier::new(3)),
+        };
+        let tool_exec = MockToolExecutor::always_ok("");
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            execute_workflow(
+                &wf,
+                HashMap::new(),
+                &prompt_exec,
+                &tool_exec,
+                Path::new("."),
+                "qwen3:4b",
+            ),
+        )
+        .await
+        .expect(
+            "parallel children must run concurrently (sequential would deadlock on the barrier)",
+        )
+        .unwrap();
+
+        // All three completed and merged.
+        assert_eq!(result.outputs.len(), 0); // no `outputs:` mapping; last step is the parallel (no single output)
+        // The merge happened: assert via a follow-up is unnecessary — reaching
+        // here past the barrier already proves all three ran concurrently.
     }
 
     // --- T032: Transform step tests ---

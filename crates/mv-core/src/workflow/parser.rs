@@ -233,6 +233,37 @@ steps:
     }
 
     #[test]
+    fn parse_parallel_step() {
+        let yaml = r#"
+name: parallel-test
+version: "1.0"
+steps:
+  - id: fanout
+    type: parallel
+    steps:
+      - id: a
+        type: prompt
+        output: out_a
+        template: "A {{topic}}"
+      - id: b
+        type: prompt
+        output: out_b
+        template: "B {{topic}}"
+"#;
+        let wf = load_from_str(yaml, "test.yaml").unwrap();
+        match &wf.steps[0] {
+            Step::Parallel(p) => {
+                assert_eq!(p.id, "fanout");
+                assert_eq!(p.steps.len(), 2);
+                assert_eq!(p.steps[0].id(), "a");
+                assert_eq!(p.steps[1].id(), "b");
+            }
+            other => panic!("expected Parallel, got {other:?}"),
+        }
+        assert_eq!(wf.steps[0].output(), None);
+    }
+
+    #[test]
     fn parse_defaults() {
         let wf = load_from_str(VALID_WORKFLOW, "test.yaml").unwrap();
         let defaults = wf.defaults.unwrap();

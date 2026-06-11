@@ -71,6 +71,8 @@ pub enum Step {
     Transform(TransformStep),
     #[serde(rename = "branch")]
     Branch(BranchStep),
+    #[serde(rename = "parallel")]
+    Parallel(ParallelStep),
 }
 
 impl Step {
@@ -80,17 +82,18 @@ impl Step {
             Step::Tool(s) => &s.id,
             Step::Transform(s) => &s.id,
             Step::Branch(s) => &s.id,
+            Step::Parallel(s) => &s.id,
         }
     }
 
     /// The single output name a leaf step produces, or `None` for control-flow
-    /// steps (`branch`) whose outputs come from their nested arm steps.
+    /// steps (`branch`, `parallel`) whose outputs come from their nested steps.
     pub fn output(&self) -> Option<&str> {
         match self {
             Step::Prompt(s) => Some(&s.output),
             Step::Tool(s) => Some(&s.output),
             Step::Transform(s) => Some(&s.output),
-            Step::Branch(_) => None,
+            Step::Branch(_) | Step::Parallel(_) => None,
         }
     }
 
@@ -100,6 +103,7 @@ impl Step {
             Step::Tool(s) => s.name.as_deref(),
             Step::Transform(s) => s.name.as_deref(),
             Step::Branch(s) => s.name.as_deref(),
+            Step::Parallel(s) => s.name.as_deref(),
         }
     }
 }
@@ -171,6 +175,21 @@ pub struct BranchStep {
     pub then: Vec<Step>,
     #[serde(default, rename = "else")]
     pub otherwise: Vec<Step>,
+}
+
+/// A parallel step — runs its child steps concurrently (fork-join).
+///
+/// Each child executes against an immutable snapshot of the context taken at
+/// the fork, so siblings never see each other's outputs; their outputs must be
+/// disjoint and merge back into the context at the join. All children run to
+/// completion; if any fail, the step reports every failure.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParallelStep {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub steps: Vec<Step>,
 }
 
 /// Error handling strategy for tool steps.

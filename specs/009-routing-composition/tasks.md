@@ -130,19 +130,28 @@ through arms.
 
 ## Phase 4: WS4 — `parallel` step
 
-- [ ] T015 [WS4] `Step::Parallel { steps }` in types + parser; parse tests
-  (FR-009)
-- [ ] T016 [WS4] Validation: children render only against pre-fork context —
+- [X] T015 [WS4] `Step::Parallel { steps }` in types + parser; parse tests
+  (FR-009). *`Step::output()` is `None` for parallel too; new `futures = "0.3"`
+  dep on mv-core for `join_all`.*
+- [X] T016 [WS4] Validation: children render only against pre-fork context —
   referencing a sibling's output is an error; disjoint outputs via the T012
-  recursive duplicate-output walk; tests (FR-009, SC-004)
-- [ ] T017 [WS4] Engine: fork-join via `futures::future::join_all` (no
+  recursive duplicate-output walk; tests (FR-009, SC-004). *Each child validated
+  via `validate_steps(slice::from_ref(child), &available, …)` so siblings are
+  invisible; unlike a branch (intersection), the *union* of child outputs is
+  available after the join (all children run). New `EmptyParallel` error.*
+- [X] T017 [WS4] Engine: fork-join via `futures::future::join_all` (no
   `tokio::spawn`); each child gets `ExecutionContext::snapshot()`; merge
   outputs in declaration order at the join; all children run to completion,
   then aggregate failures into one error naming every failed child;
-  **rendezvous test** proving genuine concurrency (two children must be
-  in-flight simultaneously to complete) (FR-009, SC-003)
-- [ ] T018 [WS4] Example workflow `workflows/examples/parallel-example.yaml` +
-  e2e CLI test against the fake proxy (FR-011, SC-003)
+  **rendezvous test** proving genuine concurrency (FR-009, SC-003). *Each child
+  future owns its snapshot clone and returns the mutated context;
+  `outputs_added_since` extracts the new outputs to merge. New
+  `MvError::WorkflowParallelFailed { step, failures }`. The rendezvous test uses
+  a `tokio::sync::Barrier(3)` + a 5s `timeout` — a sequential impl would
+  deadlock on the barrier and time out.*
+- [X] T018 [WS4] Example workflow `workflows/examples/parallel-example.yaml` +
+  e2e CLI test against the fake proxy (FR-011, SC-003). *Plus a `cli_workflow`
+  test validating the shipped example.*
 
 **Checkpoint**: independent steps fan out with snapshot isolation.
 
