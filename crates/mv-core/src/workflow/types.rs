@@ -19,12 +19,34 @@ pub struct Workflow {
     pub outputs: Vec<WorkflowOutput>,
 }
 
+/// How a prompt step selects its model: a single id, or an ordered preference
+/// list resolved through the fallback chain mechanism (the first reachable
+/// model serves the step).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum ModelSpec {
+    /// A bare model id, e.g. `model: qwen3:8b`.
+    Single(String),
+    /// `model: { prefer: [a, b] }` — try `a`, then `b`, …
+    Prefer { prefer: Vec<String> },
+}
+
+impl ModelSpec {
+    /// The candidate model ids in preference order.
+    pub fn candidates(&self) -> Vec<String> {
+        match self {
+            ModelSpec::Single(id) => vec![id.clone()],
+            ModelSpec::Prefer { prefer } => prefer.clone(),
+        }
+    }
+}
+
 /// Default settings inherited by all steps unless overridden.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowDefaults {
     #[serde(default)]
-    pub model: Option<String>,
+    pub model: Option<ModelSpec>,
     #[serde(default)]
     pub temperature: Option<f64>,
     #[serde(default)]
@@ -57,6 +79,9 @@ pub enum InputType {
 }
 
 /// A single unit of work within a workflow, discriminated by `type`.
+///
+/// `Branch` is a control-flow step: it owns nested arm step-lists rather than
+/// producing a single output, which is why [`Step::output`] returns `Option`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum Step {
@@ -66,6 +91,10 @@ pub enum Step {
     Tool(ToolStep),
     #[serde(rename = "transform")]
     Transform(TransformStep),
+    #[serde(rename = "branch")]
+    Branch(BranchStep),
+    #[serde(rename = "parallel")]
+    Parallel(ParallelStep),
 }
 
 impl Step {
@@ -74,14 +103,19 @@ impl Step {
             Step::Prompt(s) => &s.id,
             Step::Tool(s) => &s.id,
             Step::Transform(s) => &s.id,
+            Step::Branch(s) => &s.id,
+            Step::Parallel(s) => &s.id,
         }
     }
 
-    pub fn output(&self) -> &str {
+    /// The single output name a leaf step produces, or `None` for control-flow
+    /// steps (`branch`, `parallel`) whose outputs come from their nested steps.
+    pub fn output(&self) -> Option<&str> {
         match self {
-            Step::Prompt(s) => &s.output,
-            Step::Tool(s) => &s.output,
-            Step::Transform(s) => &s.output,
+            Step::Prompt(s) => Some(&s.output),
+            Step::Tool(s) => Some(&s.output),
+            Step::Transform(s) => Some(&s.output),
+            Step::Branch(_) | Step::Parallel(_) => None,
         }
     }
 
@@ -90,6 +124,8 @@ impl Step {
             Step::Prompt(s) => s.name.as_deref(),
             Step::Tool(s) => s.name.as_deref(),
             Step::Transform(s) => s.name.as_deref(),
+            Step::Branch(s) => s.name.as_deref(),
+            Step::Parallel(s) => s.name.as_deref(),
         }
     }
 }
@@ -103,7 +139,7 @@ pub struct PromptStep {
     pub name: Option<String>,
     pub output: String,
     #[serde(default)]
-    pub model: Option<String>,
+    pub model: Option<ModelSpec>,
     #[serde(default)]
     pub temperature: Option<f64>,
     #[serde(default)]
@@ -143,6 +179,39 @@ pub struct TransformStep {
     pub input: String,
     #[serde(default)]
     pub schema: Option<serde_json::Value>,
+}
+
+/// A branch step — runs one of two nested step-lists based on a condition.
+///
+/// The `condition` is a minijinja expression (the same template language as
+/// `{{…}}`, e.g. `style == 'detailed'`) evaluated against the execution
+/// context. `then` runs when it is truthy; the optional `else` runs otherwise.
+/// Arms may nest further branch steps.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BranchStep {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub condition: String,
+    pub then: Vec<Step>,
+    #[serde(default, rename = "else")]
+    pub otherwise: Vec<Step>,
+}
+
+/// A parallel step — runs its child steps concurrently (fork-join).
+///
+/// Each child executes against an immutable snapshot of the context taken at
+/// the fork, so siblings never see each other's outputs; their outputs must be
+/// disjoint and merge back into the context at the join. All children run to
+/// completion; if any fail, the step reports every failure.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParallelStep {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub steps: Vec<Step>,
 }
 
 /// Error handling strategy for tool steps.
@@ -187,4 +256,68 @@ pub enum BackoffStrategy {
 pub struct WorkflowOutput {
     pub name: String,
     pub from: String,
+}
+
+impl Workflow {
+    /// Every `(step_id, model_id)` a prompt step or the workflow defaults
+    /// reference, recursing through `branch`/`parallel`. The binary checks
+    /// these against the model registry before running (mv-core stays
+    /// registry-free); `defaults.model` ids are reported under `"defaults"`.
+    pub fn model_references(&self) -> Vec<(String, String)> {
+        let mut refs = Vec::new();
+        if let Some(spec) = self.defaults.as_ref().and_then(|d| d.model.as_ref()) {
+            for id in spec.candidates() {
+                refs.push(("defaults".to_string(), id));
+            }
+        }
+        collect_model_references(&self.steps, &mut refs);
+        refs
+    }
+}
+
+/// Find a step by id, descending into branch arms and parallel children —
+/// shared by the engine (workflow `outputs` mapping) and the validator.
+pub fn find_step<'a>(steps: &'a [Step], id: &str) -> Option<&'a Step> {
+    for step in steps {
+        if step.id() == id {
+            return Some(step);
+        }
+        match step {
+            Step::Branch(bs) => {
+                if let Some(found) = find_step(&bs.then, id) {
+                    return Some(found);
+                }
+                if let Some(found) = find_step(&bs.otherwise, id) {
+                    return Some(found);
+                }
+            }
+            Step::Parallel(par) => {
+                if let Some(found) = find_step(&par.steps, id) {
+                    return Some(found);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn collect_model_references(steps: &[Step], refs: &mut Vec<(String, String)>) {
+    for step in steps {
+        match step {
+            Step::Prompt(ps) => {
+                if let Some(spec) = &ps.model {
+                    for id in spec.candidates() {
+                        refs.push((ps.id.clone(), id));
+                    }
+                }
+            }
+            Step::Branch(bs) => {
+                collect_model_references(&bs.then, refs);
+                collect_model_references(&bs.otherwise, refs);
+            }
+            Step::Parallel(par) => collect_model_references(&par.steps, refs),
+            Step::Tool(_) | Step::Transform(_) => {}
+        }
+    }
 }

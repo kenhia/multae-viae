@@ -13,14 +13,18 @@ pub use super::transform::execute_transform;
 
 /// Trait for executing prompt steps — enables mocking in tests.
 ///
-/// Methods return `Send` futures and implementors are `Send + Sync` so step
-/// execution can be moved onto worker tasks (the Phase 5 `parallel` step
-/// type spawns arms with `tokio::spawn`).
+/// Methods return `Send` futures and implementors are `Send + Sync`; the
+/// `parallel` step type runs children concurrently with
+/// `futures::future::join_all` on the current task (no `tokio::spawn`, so no
+/// `'static` bound on the executor borrows).
 pub trait PromptExecutor: Send + Sync {
+    /// `models` is the candidate list in preference order (a single id for a
+    /// bare `model:`, or the `prefer:` list). The executor tries them through
+    /// the fallback chain mechanism; the first reachable model serves the step.
     fn execute_prompt(
         &self,
         prompt_text: &str,
-        model: &str,
+        models: &[String],
         temperature: Option<f64>,
         max_tokens: Option<u64>,
     ) -> impl std::future::Future<Output = Result<String, MvError>> + Send;
@@ -72,10 +76,20 @@ impl ExecutionContext {
         vars
     }
 
-    /// Immutable copy of the current state. Parallel arms will each receive
-    /// a snapshot taken at the fork, never a shared mutable context.
+    /// Immutable copy of the current state. Parallel children each receive a
+    /// snapshot taken at the fork, never a shared mutable context.
     pub fn snapshot(&self) -> Self {
         self.clone()
+    }
+
+    /// Outputs present here but not in `base` — the new outputs a parallel
+    /// child produced on top of its fork snapshot, for merging at the join.
+    pub fn outputs_added_since(&self, base: &ExecutionContext) -> Vec<(String, String)> {
+        self.outputs
+            .iter()
+            .filter(|(name, _)| !base.outputs.contains_key(*name))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect()
     }
 }
 
@@ -87,7 +101,9 @@ pub struct WorkflowResult {
 
 /// Defaults applied to prompt steps that don't override them.
 struct StepDefaults {
-    model: String,
+    /// Default candidate model list (preference order) for steps with no
+    /// explicit `model:`.
+    models: Vec<String>,
     temperature: Option<f64>,
     max_tokens: Option<u64>,
 }
@@ -152,11 +168,12 @@ pub async fn execute_workflow<P: PromptExecutor, T: ToolExecutor>(
     let mut ctx = ExecutionContext::new(resolved_inputs);
 
     let defaults = StepDefaults {
-        model: workflow
+        models: workflow
             .defaults
             .as_ref()
-            .and_then(|d| d.model.clone())
-            .unwrap_or_else(|| default_model.to_string()),
+            .and_then(|d| d.model.as_ref())
+            .map(|spec| spec.candidates())
+            .unwrap_or_else(|| vec![default_model.to_string()]),
         temperature: workflow.defaults.as_ref().and_then(|d| d.temperature),
         max_tokens: workflow.defaults.as_ref().and_then(|d| d.max_tokens),
     };
@@ -178,9 +195,8 @@ pub async fn execute_workflow<P: PromptExecutor, T: ToolExecutor>(
     })
 }
 
-/// Run a step list against a mutable context. Extracted from
-/// `execute_workflow` so future nested step types (`branch`, `workflow`)
-/// can recurse into a sub-list (via `Box::pin`).
+/// Run a step list against a mutable context. Recurses into nested step lists
+/// (the `branch` arms) via `Box::pin` for the async recursion.
 async fn execute_steps<P: PromptExecutor, T: ToolExecutor>(
     steps: &[Step],
     ctx: &mut ExecutionContext,
@@ -194,14 +210,14 @@ async fn execute_steps<P: PromptExecutor, T: ToolExecutor>(
             "workflow_step",
             step.id = %step.id(),
             step.type = %step_type_name(step),
-            step.output = %step.output(),
+            step.output = step.output().unwrap_or(""),
         );
         let _enter = step_span.enter();
         let start = std::time::Instant::now();
 
         debug!(step_id = %step.id(), step_type = %step_type_name(step), "executing step");
 
-        let output = execute_step(
+        execute_step(
             step,
             ctx,
             defaults,
@@ -211,30 +227,44 @@ async fn execute_steps<P: PromptExecutor, T: ToolExecutor>(
         )
         .await?;
 
+        // Leaf steps just recorded their output into ctx — surface its name
+        // and size; control steps (branch/parallel) log empty/0.
+        let output_name = step.output().unwrap_or("");
+        let output_len = step
+            .output()
+            .and_then(|name| ctx.output(name))
+            .map_or(0, str::len);
         info!(
             step_id = %step.id(),
-            output_name = %step.output(),
-            output_len = output.len(),
+            output_name,
+            output_len,
             duration_ms = start.elapsed().as_millis() as u64,
             "step completed"
         );
-        ctx.insert_output(step.output(), output);
     }
     Ok(())
 }
 
-/// Execute a single step against an immutable view of the context.
+/// Execute a single step, recording any leaf output into the context. Control
+/// steps (`branch`) mutate the context by recursing into the chosen arm rather
+/// than producing a single output.
 async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
     step: &Step,
-    ctx: &ExecutionContext,
+    ctx: &mut ExecutionContext,
     defaults: &StepDefaults,
     prompt_executor: &P,
     tool_executor: &T,
     workflow_dir: &Path,
-) -> Result<String, MvError> {
+) -> Result<(), MvError> {
     match step {
         Step::Prompt(ps) => {
-            let model = ps.model.as_deref().unwrap_or(&defaults.model);
+            // Resolve the candidate model list: the step's `model:` spec, or
+            // the workflow default candidate list.
+            let models = ps
+                .model
+                .as_ref()
+                .map(|spec| spec.candidates())
+                .unwrap_or_else(|| defaults.models.clone());
             let temp = ps.temperature.or(defaults.temperature);
             let max_tok = ps.max_tokens.or(defaults.max_tokens);
 
@@ -263,13 +293,14 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
                 }
             })?;
 
-            prompt_executor
-                .execute_prompt(&rendered, model, temp, max_tok)
+            let output = prompt_executor
+                .execute_prompt(&rendered, &models, temp, max_tok)
                 .await
                 .map_err(|e| MvError::WorkflowStepError {
                     step: ps.id.clone(),
                     source: Box::new(e),
-                })
+                })?;
+            ctx.insert_output(&ps.output, output);
         }
         Step::Tool(ts) => {
             // Render tool inputs from context — every string leaf, including
@@ -280,7 +311,9 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
                 rendered_inputs.insert(key.clone(), render_json_value(val, &vars, &ts.id)?);
             }
 
-            execute_tool_with_error_handling(ts, &rendered_inputs, tool_executor).await
+            let output =
+                execute_tool_with_error_handling(ts, &rendered_inputs, tool_executor).await?;
+            ctx.insert_output(&ts.output, output);
         }
         Step::Transform(ts) => {
             let vars = ctx.to_template_context();
@@ -291,9 +324,82 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
                 }
             })?;
 
-            execute_transform(&ts.id, &ts.operation, &input_value, ts.schema.as_ref())
+            let output =
+                execute_transform(&ts.id, &ts.operation, &input_value, ts.schema.as_ref())?;
+            ctx.insert_output(&ts.output, output);
+        }
+        Step::Branch(bs) => {
+            // Evaluate the condition against the current context, then run the
+            // chosen arm — its steps write their outputs into `ctx` directly.
+            let vars = ctx.to_template_context();
+            let take_then = template::evaluate_condition(&bs.condition, &vars).map_err(|e| {
+                MvError::WorkflowTemplateError {
+                    step: bs.id.clone(),
+                    details: e,
+                }
+            })?;
+            debug!(step_id = %bs.id, take_then, "branch condition evaluated");
+            let arm = if take_then { &bs.then } else { &bs.otherwise };
+            Box::pin(execute_steps(
+                arm,
+                ctx,
+                defaults,
+                prompt_executor,
+                tool_executor,
+                workflow_dir,
+            ))
+            .await?;
+        }
+        Step::Parallel(par) => {
+            // Fork: each child runs against an immutable snapshot taken now, so
+            // siblings never observe each other's outputs.
+            let snapshot = ctx.snapshot();
+            let child_futures = par.steps.iter().map(|child| {
+                let mut child_ctx = snapshot.clone();
+                async move {
+                    Box::pin(execute_steps(
+                        std::slice::from_ref(child),
+                        &mut child_ctx,
+                        defaults,
+                        prompt_executor,
+                        tool_executor,
+                        workflow_dir,
+                    ))
+                    .await
+                    .map(|()| child_ctx)
+                }
+            });
+
+            // Join: run every child to completion (no early abort — partial
+            // side effects must not be scheduling-dependent).
+            let results = futures::future::join_all(child_futures).await;
+
+            let mut failures: Vec<(String, String)> = Vec::new();
+            let mut completed: Vec<ExecutionContext> = Vec::new();
+            for (child, result) in par.steps.iter().zip(results) {
+                match result {
+                    Ok(child_ctx) => completed.push(child_ctx),
+                    Err(e) => failures.push((child.id().to_string(), e.to_string())),
+                }
+            }
+            if !failures.is_empty() {
+                return Err(MvError::WorkflowParallelFailed {
+                    step: par.id.clone(),
+                    failures,
+                });
+            }
+
+            // Merge each child's new outputs back into the parent context, in
+            // declaration order (outputs are validated disjoint, so order only
+            // affects determinism, not correctness).
+            for child_ctx in completed {
+                for (name, value) in child_ctx.outputs_added_since(&snapshot) {
+                    ctx.insert_output(name, value);
+                }
+            }
         }
     }
+    Ok(())
 }
 
 /// Render every string leaf of a JSON value through the template engine —
@@ -333,29 +439,32 @@ fn step_type_name(step: &Step) -> &'static str {
         Step::Prompt(_) => "prompt",
         Step::Tool(_) => "tool",
         Step::Transform(_) => "transform",
+        Step::Branch(_) => "branch",
+        Step::Parallel(_) => "parallel",
     }
 }
 
 fn build_workflow_outputs(workflow: &Workflow, ctx: &ExecutionContext) -> HashMap<String, String> {
     if workflow.outputs.is_empty() {
-        // When no outputs specified, return last step's output
-        if let Some(last_step) = workflow.steps.last() {
-            let mut map = HashMap::new();
-            if let Some(output) = ctx.output(last_step.output()) {
-                map.insert(last_step.output().to_string(), output.to_string());
-            }
-            map
-        } else {
-            HashMap::new()
+        // When no outputs specified, return the last step's output (if it is a
+        // leaf step that produced one — a trailing branch has no single output).
+        let mut map = HashMap::new();
+        if let Some(output_name) = workflow.steps.last().and_then(|s| s.output())
+            && let Some(value) = ctx.output(output_name)
+        {
+            map.insert(output_name.to_string(), value.to_string());
         }
+        map
     } else {
         workflow
             .outputs
             .iter()
             .filter_map(|wo| {
-                // wo.from is a step ID — find that step's output name
-                let step = workflow.steps.iter().find(|s| s.id() == wo.from)?;
-                let output_name = step.output();
+                // wo.from is a step ID — find that step's output name.
+                // Validation guarantees the step exists and its output is
+                // definitely defined on every execution path.
+                let step = super::types::find_step(&workflow.steps, &wo.from)?;
+                let output_name = step.output()?;
                 ctx.output(output_name)
                     .map(|v| (wo.name.clone(), v.to_string()))
             })
@@ -396,14 +505,16 @@ mod tests {
         async fn execute_prompt(
             &self,
             prompt_text: &str,
-            model: &str,
+            models: &[String],
             _temperature: Option<f64>,
             _max_tokens: Option<u64>,
         ) -> Result<String, MvError> {
+            // Record the candidate list as a comma-joined string — a single
+            // model is just its id (back-compat with the pre-prefer tests).
             self.calls
                 .lock()
                 .unwrap()
-                .push((prompt_text.to_string(), model.to_string()));
+                .push((prompt_text.to_string(), models.join(",")));
             let mut responses = self.responses.lock().unwrap();
             if responses.is_empty() {
                 Err(MvError::CompletionFailed {
@@ -1092,6 +1203,428 @@ steps:
             }
             other => panic!("expected WorkflowStepFailed, got: {other}"),
         }
+    }
+
+    // --- 009/WS3: branch execution ---
+
+    #[tokio::test]
+    async fn branch_runs_then_arm_when_condition_true() {
+        let yaml = r#"
+name: branch-then
+version: "1.0"
+inputs:
+  - name: style
+    type: string
+    required: true
+steps:
+  - id: route
+    type: branch
+    condition: "style == 'detailed'"
+    then:
+      - id: deep
+        type: prompt
+        output: answer
+        template: "Deep dive"
+    else:
+      - id: quick
+        type: prompt
+        output: answer
+        template: "Quick take"
+  - id: use
+    type: prompt
+    output: final
+    template: "Answer: {{answer}}"
+outputs:
+  - name: result
+    from: use
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let prompt_exec = MockPromptExecutor::new(vec!["DEEP", "used"]);
+        let tool_exec = MockToolExecutor::always_ok("");
+        let inputs = [("style".to_string(), "detailed".to_string())]
+            .into_iter()
+            .collect();
+
+        let result = execute_workflow(
+            &wf,
+            inputs,
+            &prompt_exec,
+            &tool_exec,
+            Path::new("."),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap();
+
+        // Only the then arm + the post-branch step ran.
+        let calls = prompt_exec.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "Deep dive");
+        assert_eq!(calls[1].0, "Answer: DEEP");
+        assert_eq!(result.outputs["result"], "used");
+    }
+
+    #[tokio::test]
+    async fn branch_runs_else_arm_when_condition_false() {
+        let yaml = r#"
+name: branch-else
+version: "1.0"
+inputs:
+  - name: style
+    type: string
+    required: true
+steps:
+  - id: route
+    type: branch
+    condition: "style == 'detailed'"
+    then:
+      - id: deep
+        type: prompt
+        output: answer
+        template: "Deep dive"
+    else:
+      - id: quick
+        type: prompt
+        output: answer
+        template: "Quick take"
+  - id: use
+    type: prompt
+    output: final
+    template: "Answer: {{answer}}"
+outputs:
+  - name: result
+    from: use
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let prompt_exec = MockPromptExecutor::new(vec!["QUICK", "used"]);
+        let tool_exec = MockToolExecutor::always_ok("");
+        let inputs = [("style".to_string(), "brief".to_string())]
+            .into_iter()
+            .collect();
+
+        let result = execute_workflow(
+            &wf,
+            inputs,
+            &prompt_exec,
+            &tool_exec,
+            Path::new("."),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap();
+
+        let calls = prompt_exec.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "Quick take");
+        assert_eq!(calls[1].0, "Answer: QUICK");
+        assert_eq!(result.outputs["result"], "used");
+    }
+
+    #[tokio::test]
+    async fn branch_false_with_no_else_is_noop() {
+        let yaml = r#"
+name: branch-noop
+version: "1.0"
+inputs:
+  - name: flag
+    type: string
+    required: true
+steps:
+  - id: first
+    type: prompt
+    output: base
+    template: "base"
+  - id: maybe
+    type: branch
+    condition: "flag == 'on'"
+    then:
+      - id: extra
+        type: prompt
+        output: extra_out
+        template: "extra"
+  - id: last
+    type: prompt
+    output: done
+    template: "After {{base}}"
+outputs:
+  - name: result
+    from: last
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        // flag is off → only `first` and `last` run (2 prompt calls).
+        let prompt_exec = MockPromptExecutor::new(vec!["B", "D"]);
+        let tool_exec = MockToolExecutor::always_ok("");
+        let inputs = [("flag".to_string(), "off".to_string())]
+            .into_iter()
+            .collect();
+
+        let result = execute_workflow(
+            &wf,
+            inputs,
+            &prompt_exec,
+            &tool_exec,
+            Path::new("."),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(prompt_exec.call_count(), 2);
+        let calls = prompt_exec.calls();
+        assert_eq!(calls[1].0, "After B");
+        assert_eq!(result.outputs["result"], "D");
+    }
+
+    #[tokio::test]
+    async fn nested_branch_executes_inner_arm() {
+        let yaml = r#"
+name: nested
+version: "1.0"
+inputs:
+  - name: a
+    type: string
+    required: true
+  - name: b
+    type: string
+    required: true
+steps:
+  - id: outer
+    type: branch
+    condition: "a == 'yes'"
+    then:
+      - id: inner
+        type: branch
+        condition: "b == 'yes'"
+        then:
+          - id: both
+            type: prompt
+            output: answer
+            template: "both yes"
+        else:
+          - id: only_a
+            type: prompt
+            output: answer
+            template: "only a"
+    else:
+      - id: neither
+        type: prompt
+        output: answer
+        template: "neither"
+  - id: use
+    type: prompt
+    output: final
+    template: "Got {{answer}}"
+outputs:
+  - name: result
+    from: use
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let prompt_exec = MockPromptExecutor::new(vec!["INNER", "used"]);
+        let tool_exec = MockToolExecutor::always_ok("");
+        let inputs = [
+            ("a".to_string(), "yes".to_string()),
+            ("b".to_string(), "yes".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        let result = execute_workflow(
+            &wf,
+            inputs,
+            &prompt_exec,
+            &tool_exec,
+            Path::new("."),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap();
+
+        let calls = prompt_exec.calls();
+        assert_eq!(calls[0].0, "both yes");
+        assert_eq!(calls[1].0, "Got INNER");
+        assert_eq!(result.outputs["result"], "used");
+    }
+
+    // --- 009/WS4: parallel execution ---
+
+    #[tokio::test]
+    async fn parallel_runs_all_children_and_merges_outputs() {
+        let yaml = r#"
+name: parallel-merge
+version: "1.0"
+inputs:
+  - name: topic
+    type: string
+    required: true
+steps:
+  - id: fan
+    type: parallel
+    steps:
+      - id: a
+        type: prompt
+        output: out_a
+        template: "A: {{topic}}"
+      - id: b
+        type: prompt
+        output: out_b
+        template: "B: {{topic}}"
+  - id: combine
+    type: prompt
+    output: final
+    template: "{{out_a}} | {{out_b}}"
+outputs:
+  - name: result
+    from: combine
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        // Children run concurrently; the mock returns responses in call order,
+        // which is non-deterministic, so make both arms return the same marker
+        // to keep the assertion order-independent.
+        let prompt_exec = MockPromptExecutor::new(vec!["RA", "RB", "combined"]);
+        let tool_exec = MockToolExecutor::always_ok("");
+        let inputs = [("topic".to_string(), "x".to_string())]
+            .into_iter()
+            .collect();
+
+        let result = execute_workflow(
+            &wf,
+            inputs,
+            &prompt_exec,
+            &tool_exec,
+            Path::new("."),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap();
+
+        // Both children ran plus the combine step.
+        assert_eq!(prompt_exec.call_count(), 3);
+        // The combine step saw both merged outputs (order of RA/RB may vary).
+        let combine_prompt = &prompt_exec.calls()[2].0;
+        assert!(
+            combine_prompt.contains("RA") && combine_prompt.contains("RB"),
+            "combine should see both parallel outputs, got: {combine_prompt}"
+        );
+        assert_eq!(result.outputs["result"], "combined");
+    }
+
+    #[tokio::test]
+    async fn parallel_aggregates_all_child_failures() {
+        let yaml = r#"
+name: parallel-fail
+version: "1.0"
+steps:
+  - id: fan
+    type: parallel
+    steps:
+      - id: a
+        type: prompt
+        output: out_a
+        template: "A"
+      - id: b
+        type: prompt
+        output: out_b
+        template: "B"
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        // No mock responses → every prompt call fails.
+        let prompt_exec = MockPromptExecutor::new(vec![]);
+        let tool_exec = MockToolExecutor::always_ok("");
+
+        let err = execute_workflow(
+            &wf,
+            HashMap::new(),
+            &prompt_exec,
+            &tool_exec,
+            Path::new("."),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap_err();
+
+        match err {
+            MvError::WorkflowParallelFailed { step, failures } => {
+                assert_eq!(step, "fan");
+                // Both children ran to completion and both failures reported.
+                assert_eq!(failures.len(), 2, "got: {failures:?}");
+                let ids: Vec<&str> = failures.iter().map(|(id, _)| id.as_str()).collect();
+                assert!(ids.contains(&"a") && ids.contains(&"b"), "got: {ids:?}");
+            }
+            other => panic!("expected WorkflowParallelFailed, got: {other:?}"),
+        }
+    }
+
+    /// Prompt executor whose calls rendezvous on a shared barrier: each call
+    /// blocks until `n` calls are in flight. If the engine ran children
+    /// sequentially, the first call would block forever — so completing within
+    /// the timeout proves genuine concurrency.
+    struct RendezvousExecutor {
+        barrier: std::sync::Arc<tokio::sync::Barrier>,
+    }
+
+    impl PromptExecutor for RendezvousExecutor {
+        async fn execute_prompt(
+            &self,
+            prompt_text: &str,
+            _models: &[String],
+            _temperature: Option<f64>,
+            _max_tokens: Option<u64>,
+        ) -> Result<String, MvError> {
+            self.barrier.wait().await;
+            Ok(prompt_text.to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_children_run_concurrently() {
+        let yaml = r#"
+name: rendezvous
+version: "1.0"
+steps:
+  - id: fan
+    type: parallel
+    steps:
+      - id: a
+        type: prompt
+        output: out_a
+        template: "A"
+      - id: b
+        type: prompt
+        output: out_b
+        template: "B"
+      - id: c
+        type: prompt
+        output: out_c
+        template: "C"
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        // Barrier of 3: all three children must be in flight simultaneously.
+        let prompt_exec = RendezvousExecutor {
+            barrier: std::sync::Arc::new(tokio::sync::Barrier::new(3)),
+        };
+        let tool_exec = MockToolExecutor::always_ok("");
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            execute_workflow(
+                &wf,
+                HashMap::new(),
+                &prompt_exec,
+                &tool_exec,
+                Path::new("."),
+                "qwen3:4b",
+            ),
+        )
+        .await
+        .expect(
+            "parallel children must run concurrently (sequential would deadlock on the barrier)",
+        )
+        .unwrap();
+
+        // All three completed and merged.
+        assert_eq!(result.outputs.len(), 0); // no `outputs:` mapping; last step is the parallel (no single output)
+        // The merge happened: assert via a follow-up is unnecessary — reaching
+        // here past the barrier already proves all three ran concurrently.
     }
 
     // --- T032: Transform step tests ---

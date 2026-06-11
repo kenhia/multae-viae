@@ -1308,6 +1308,7 @@ dependencies = [
 name = "mv-core"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "minijinja",
  "reqwest 0.13.3",
  "rig-core",
@@ -1319,6 +1320,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]

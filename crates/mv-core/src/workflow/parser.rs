@@ -175,10 +175,138 @@ steps:
     }
 
     #[test]
+    fn parse_branch_step() {
+        let yaml = r#"
+name: branch-test
+version: "1.0"
+steps:
+  - id: route
+    type: branch
+    condition: "style == 'detailed'"
+    then:
+      - id: deep
+        type: prompt
+        output: answer
+        template: "Deep: {{topic}}"
+    else:
+      - id: quick
+        type: prompt
+        output: answer
+        template: "Quick: {{topic}}"
+"#;
+        let wf = load_from_str(yaml, "test.yaml").unwrap();
+        match &wf.steps[0] {
+            Step::Branch(b) => {
+                assert_eq!(b.id, "route");
+                assert_eq!(b.condition, "style == 'detailed'");
+                assert_eq!(b.then.len(), 1);
+                assert_eq!(b.otherwise.len(), 1);
+                assert_eq!(b.then[0].id(), "deep");
+                assert_eq!(b.otherwise[0].id(), "quick");
+            }
+            other => panic!("expected Branch, got {other:?}"),
+        }
+        // A branch step produces no single output.
+        assert_eq!(wf.steps[0].output(), None);
+    }
+
+    #[test]
+    fn parse_branch_without_else() {
+        let yaml = r#"
+name: branch-no-else
+version: "1.0"
+steps:
+  - id: maybe
+    type: branch
+    condition: "flag"
+    then:
+      - id: act
+        type: prompt
+        output: out
+        template: "Act"
+"#;
+        let wf = load_from_str(yaml, "test.yaml").unwrap();
+        match &wf.steps[0] {
+            Step::Branch(b) => assert!(b.otherwise.is_empty()),
+            other => panic!("expected Branch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_parallel_step() {
+        let yaml = r#"
+name: parallel-test
+version: "1.0"
+steps:
+  - id: fanout
+    type: parallel
+    steps:
+      - id: a
+        type: prompt
+        output: out_a
+        template: "A {{topic}}"
+      - id: b
+        type: prompt
+        output: out_b
+        template: "B {{topic}}"
+"#;
+        let wf = load_from_str(yaml, "test.yaml").unwrap();
+        match &wf.steps[0] {
+            Step::Parallel(p) => {
+                assert_eq!(p.id, "fanout");
+                assert_eq!(p.steps.len(), 2);
+                assert_eq!(p.steps[0].id(), "a");
+                assert_eq!(p.steps[1].id(), "b");
+            }
+            other => panic!("expected Parallel, got {other:?}"),
+        }
+        assert_eq!(wf.steps[0].output(), None);
+    }
+
+    #[test]
     fn parse_defaults() {
         let wf = load_from_str(VALID_WORKFLOW, "test.yaml").unwrap();
         let defaults = wf.defaults.unwrap();
-        assert_eq!(defaults.model.as_deref(), Some("qwen3:4b"));
+        assert_eq!(
+            defaults.model.map(|s| s.candidates()),
+            Some(vec!["qwen3:4b".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_prompt_model_prefer_list() {
+        let yaml = r#"
+name: prefer-test
+version: "1.0"
+steps:
+  - id: s1
+    type: prompt
+    output: out
+    model:
+      prefer: [local-fast, cloud-fallback]
+    template: "hi"
+  - id: s2
+    type: prompt
+    output: out2
+    model: just-one
+    template: "yo"
+"#;
+        let wf = load_from_str(yaml, "test.yaml").unwrap();
+        match &wf.steps[0] {
+            Step::Prompt(ps) => assert_eq!(
+                ps.model.as_ref().map(|s| s.candidates()),
+                Some(vec!["local-fast".to_string(), "cloud-fallback".to_string()])
+            ),
+            other => panic!("expected Prompt, got {other:?}"),
+        }
+        // A bare string still parses as a single-candidate spec (back-compat).
+        match &wf.steps[1] {
+            Step::Prompt(ps) => assert_eq!(
+                ps.model.as_ref().map(|s| s.candidates()),
+                Some(vec!["just-one".to_string()])
+            ),
+            other => panic!("expected Prompt, got {other:?}"),
+        }
     }
 
     #[test]

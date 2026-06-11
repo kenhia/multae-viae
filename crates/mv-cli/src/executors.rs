@@ -3,7 +3,7 @@
 
 use rig::tool::server::ToolServerHandle;
 
-use crate::providers::{GenParams, complete};
+use crate::providers::{GenParams, build_chain, complete_chain};
 
 /// Prompt executor that routes workflow prompt steps through the shared
 /// provider dispatch seam.
@@ -16,32 +16,37 @@ impl mv_core::workflow::engine::PromptExecutor for RigPromptExecutor {
     async fn execute_prompt(
         &self,
         prompt_text: &str,
-        model: &str,
+        models: &[String],
         temperature: Option<f64>,
         max_tokens: Option<u64>,
     ) -> Result<String, mv_core::MvError> {
-        // A typo'd model must fail loudly — silently substituting the default
-        // model would run the step elsewhere and report success.
-        let entry =
-            self.registry
-                .get(model)
-                .ok_or_else(|| mv_core::MvError::ModelNotInRegistry {
-                    model: model.to_string(),
-                    available: self.registry.available_ids().join(", "),
-                })?;
+        // Resolve each preferred id (a typo'd model must fail loudly —
+        // silently substituting the default would run the step elsewhere and
+        // report success), then expand the seeds through the shared chain
+        // builder: each id contributes itself + its own `fallback` entries,
+        // deduped. So a bare `model:` behaves exactly like the CLI path, and
+        // a `prefer:` list strings several such chains together.
+        let mut seeds: Vec<(&mv_core::ModelEntry, String)> = Vec::new();
+        for id in models {
+            let entry =
+                self.registry
+                    .get(id)
+                    .ok_or_else(|| mv_core::MvError::ModelNotInRegistry {
+                        model: id.clone(),
+                        available: self.registry.available_ids().join(", "),
+                    })?;
+            seeds.push((entry, entry.endpoint()));
+        }
+        let chain = build_chain(&self.registry, &seeds);
 
         let params = GenParams {
             temperature,
             max_tokens,
         };
-        complete(
-            entry,
-            &entry.endpoint(),
-            prompt_text,
-            self.agent_handle.clone(),
-            &params,
-        )
-        .await
+        // The engine only needs the text; `model_used` is recorded on the trace.
+        complete_chain(&chain, prompt_text, self.agent_handle.clone(), &params)
+            .await
+            .map(|outcome| outcome.text)
     }
 }
 

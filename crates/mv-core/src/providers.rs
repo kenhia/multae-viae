@@ -51,7 +51,7 @@ pub fn classify_backend_error(
     {
         MvError::ModelNotLoaded {
             model: id.to_string(),
-            hint: format!("Run: just load {id}"),
+            hint: crate::trtllm::load_hint(id),
         }
     } else if msg.contains("MaxTurnError") || msg.contains("max turn limit") {
         // String fallback for layers that flatten PromptError to text.

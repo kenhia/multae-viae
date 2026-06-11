@@ -30,6 +30,19 @@ pub async fn run_workflow(args: &WorkflowRunArgs, json: bool) -> Result<(), mv_c
     // Set up executors
     let registry = mv_core::ModelRegistry::resolve(args.config.as_deref())?;
 
+    // Validate every model reference (bare `model:` and `prefer:` lists, in
+    // branch/parallel arms too) against the registry up front — a typo or an
+    // unknown `prefer` entry must fail before execution, not mid-run. Uses the
+    // same `ModelNotInRegistry` error the runtime executor would raise.
+    for (_step_id, model_id) in workflow.model_references() {
+        if registry.get(&model_id).is_none() {
+            return Err(mv_core::MvError::ModelNotInRegistry {
+                model: model_id,
+                available: registry.available_ids().join(", "),
+            });
+        }
+    }
+
     let tool_server = ToolServer::new()
         .tool(mv_core::tools::file_list::FileList)
         .tool(mv_core::tools::file_read::FileRead)

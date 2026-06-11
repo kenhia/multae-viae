@@ -1,0 +1,49 @@
+name: parallel-example
+version: "1.0"
+description: >
+  Analyze a topic from two angles concurrently, then combine the results.
+  The two children run in parallel against a snapshot of the context taken at
+  the fork — they cannot see each other's outputs — and their disjoint outputs
+  (`pros`, `cons`) merge back at the join for the final step to use.
+
+defaults:
+  model: qwen3:4b
+
+inputs:
+  - name: topic
+    type: string
+    required: true
+    description: What to analyze
+
+steps:
+  - id: analyze
+    name: Analyze from two angles
+    type: parallel
+    steps:
+      - id: upsides
+        name: Upsides
+        type: prompt
+        output: pros
+        template: "List the main upsides of: {{topic}}"
+      - id: downsides
+        name: Downsides
+        type: prompt
+        output: cons
+        template: "List the main downsides of: {{topic}}"
+
+  - id: weigh
+    name: Weigh the trade-offs
+    type: prompt
+    output: verdict
+    template: |
+      Weigh these upsides and downsides and give a balanced verdict.
+
+      Upsides:
+      {{pros}}
+
+      Downsides:
+      {{cons}}
+
+outputs:
+  - name: result
+    from: weigh

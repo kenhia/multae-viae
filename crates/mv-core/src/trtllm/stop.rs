@@ -44,6 +44,7 @@ mod tests {
             expected_vram_gb: None,
             stop_sequences: stop,
             max_turns: None,
+            fallback: None,
         }
     }
 

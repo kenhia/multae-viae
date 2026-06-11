@@ -14,7 +14,9 @@ rmcp = { version = "1.5", features = ["client", "transport-child-process", "tran
 reqwest = "0.13"
 tokio = { version = "1", features = ["process", "time"] }
 tracing = "0.1"
+futures = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
+wiremock = "0.6.5"

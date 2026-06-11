@@ -1,3 +1,8 @@
+// Shared test-helper module: each integration-test binary that pulls it in via
+// `mod support;` uses a different subset, so unused-in-one-binary helpers are
+// expected.
+#![allow(dead_code)]
+
 //! Test support: a scripted fake OpenAI/TRT-LLM proxy (T025).
 //!
 //! Backs the hermetic integration tests in `cli_fake_proxy.rs`. The fixture
@@ -140,6 +145,25 @@ impl FakeProxy {
         );
     }
 
+    /// `POST /v1/chat/completions` → 200 with an empty `choices` array. The
+    /// HTTP call succeeds, so this is not an `HttpError`; rig fails to extract a
+    /// message and the error classifies to `CompletionFailed` — NOT
+    /// fallback-eligible, so the chain walker must fail fast on it.
+    pub fn mount_chat_no_choices(&self) {
+        let body = serde_json::json!({
+            "id": "chatcmpl-fake",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "fake-llama-served",
+            "choices": [],
+        });
+        self.mount(
+            Mock::given(method("POST"))
+                .and(path("/v1/chat/completions"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body)),
+        );
+    }
+
     /// Script a multi-turn tool round trip:
     /// - first request → assistant message with one `tool_calls` entry for
     ///   `tool_name(args)`;
@@ -246,6 +270,16 @@ impl FakeProxy {
             .filter_map(|r| serde_json::from_slice(&r.body).ok())
             .collect()
     }
+}
+
+/// Reserve an ephemeral TCP port, then drop the listener — the returned
+/// `…/v1` URL is guaranteed to refuse connections for the test's duration.
+/// Used to simulate a dead backend deterministically (no live-port races).
+pub fn dead_endpoint() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    format!("http://127.0.0.1:{port}/v1")
 }
 
 /// Write a models.yaml in `dir` with a single TRT-LLM model pointed at the

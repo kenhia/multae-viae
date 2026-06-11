@@ -23,14 +23,11 @@ fn health_url(endpoint: &str) -> String {
 
 /// Check whether a TRT-LLM server is healthy.
 ///
-/// Sends a GET request to the `/health` endpoint with a 2-second timeout.
-pub async fn check_health(endpoint: &str) -> HealthCheckResult {
+/// Sends a GET request to the `/health` endpoint, bounded by `timeout`.
+pub async fn check_health(endpoint: &str, timeout: Duration) -> HealthCheckResult {
     let url = health_url(endpoint);
 
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-    {
+    let client = match reqwest::Client::builder().timeout(timeout).build() {
         Ok(c) => c,
         Err(e) => {
             return HealthCheckResult::Unreachable {
@@ -89,11 +86,12 @@ fn model_in_list(body: &str, model_name: &str) -> bool {
 /// Returns `Some(true)`/`Some(false)` when the list was fetched, or `None` when
 /// it could not be determined (request or parse failure) — callers should
 /// proceed rather than block streaming on a flaky preflight.
-pub async fn served_model_present(endpoint: &str, model_name: &str) -> Option<bool> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-        .ok()?;
+pub async fn served_model_present(
+    endpoint: &str,
+    model_name: &str,
+    timeout: Duration,
+) -> Option<bool> {
+    let client = reqwest::Client::builder().timeout(timeout).build().ok()?;
     let resp = client.get(models_url(endpoint)).send().await.ok()?;
     if resp.status().as_u16() != 200 {
         return None;
@@ -149,7 +147,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_health_unreachable() {
-        let result = check_health(&unreachable_endpoint()).await;
+        let result = check_health(&unreachable_endpoint(), Duration::from_secs(2)).await;
         assert!(matches!(result, HealthCheckResult::Unreachable { .. }));
     }
 
@@ -193,7 +191,8 @@ mod tests {
     async fn served_model_present_unreachable_returns_none() {
         // Nothing listening → cannot determine; caller proceeds.
         assert_eq!(
-            served_model_present(&unreachable_endpoint(), "llama-fp8").await,
+            served_model_present(&unreachable_endpoint(), "llama-fp8", Duration::from_secs(2))
+                .await,
             None
         );
     }

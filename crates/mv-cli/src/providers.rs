@@ -2,12 +2,28 @@
 //! rig agent call. Both the prompt command and the workflow executor route
 //! through [`complete`]; Phase 5 fallback chains will call it in a loop.
 
+use std::time::Duration;
+
+use mv_core::preflight::{PreflightStatus, preflight};
 use mv_core::providers::{SYSTEM_PREAMBLE, classify_backend_error, classify_prompt_error};
 use mv_core::trtllm::START_HINT;
-use mv_core::{ModelEntry, MvError, Provider};
+use mv_core::{ModelEntry, ModelRegistry, MvError, Provider};
 use rig::completion::Prompt;
 use rig::tool::server::ToolServerHandle;
-use tracing::{debug, info};
+use tracing::{Span, debug, info, warn};
+
+/// Network timeout for a preflight probe — short, so the router never blocks on
+/// a hung host before falling back.
+const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The result of a (possibly chained) completion: the response text plus the
+/// id of the model that actually served it — which may differ from the
+/// requested model when a fallback chain was walked.
+#[derive(Debug, Clone)]
+pub struct CompletionOutcome {
+    pub text: String,
+    pub model_used: String,
+}
 
 /// Optional sampling parameters forwarded to the provider (set by workflow
 /// steps; the plain prompt path uses provider defaults).
@@ -34,6 +50,131 @@ impl GenParams {
         }
         builder
     }
+}
+
+/// Walk `primary` and its fallback chain, returning the first success.
+///
+/// The chain is `[primary] + primary.fallback` (non-transitive — a fallback's
+/// own `fallback` list is not followed). `primary_endpoint` lets the caller
+/// override the primary's endpoint (the `--endpoint` flag / test injection);
+/// fallback entries always use their own resolved endpoint. Advancement is
+/// gated on [`MvError::is_fallback_eligible`]: a backend-dead or
+/// misconfiguration error tries the next entry, anything else (empty prompt,
+/// turn-limit, a completed-but-failed completion) fails fast. If every entry
+/// is exhausted, returns [`MvError::AllModelsFailed`] enumerating each attempt.
+pub async fn complete_with_fallback(
+    registry: &ModelRegistry,
+    primary: &ModelEntry,
+    primary_endpoint: &str,
+    prompt: &str,
+    handle: ToolServerHandle,
+    params: &GenParams,
+) -> Result<CompletionOutcome, MvError> {
+    let chain = build_chain(registry, &[(primary, primary_endpoint.to_string())]);
+    complete_chain(&chain, prompt, handle, params).await
+}
+
+/// Expand seed entries into the full candidate chain: each seed in order,
+/// followed by its own `fallback` entries, deduped by id across the whole
+/// chain. The single chain-construction rule shared by the CLI prompt path
+/// (one seed: the requested model, possibly with a `--endpoint` override) and
+/// workflow `prefer:` lists (one seed per preferred id). Seeds carry their
+/// endpoint; fallback entries use their own resolved endpoint. Fallback ids
+/// are registry-validated at load, so `get` is expected to hit; a missing
+/// entry is skipped defensively.
+pub fn build_chain<'a>(
+    registry: &'a ModelRegistry,
+    seeds: &[(&'a ModelEntry, String)],
+) -> Vec<(&'a ModelEntry, String)> {
+    let mut chain: Vec<(&ModelEntry, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (entry, endpoint) in seeds {
+        if seen.insert(entry.id.as_str()) {
+            chain.push((entry, endpoint.clone()));
+        }
+        if let Some(ids) = &entry.fallback {
+            for id in ids {
+                if let Some(fe) = registry.get(id)
+                    && seen.insert(fe.id.as_str())
+                {
+                    chain.push((fe, fe.endpoint()));
+                }
+            }
+        }
+    }
+    chain
+}
+
+/// Walk a pre-built candidate chain, returning the first success. The single
+/// fallback walker behind both [`complete_with_fallback`] (a model + its own
+/// `fallback` list) and step-level `prefer:` lists. Advancement is gated on
+/// [`MvError::is_fallback_eligible`]; a `Dead` preflight skips an entry without
+/// building an agent (multi-entry chains only). If every entry is exhausted,
+/// returns [`MvError::AllModelsFailed`] enumerating each attempt.
+#[tracing::instrument(name = "model_routing", skip_all, fields(
+    router.requested = chain.first().map(|(e, _)| e.id.as_str()).unwrap_or(""),
+    router.selected = tracing::field::Empty,
+    router.reason = tracing::field::Empty,
+))]
+pub async fn complete_chain(
+    chain: &[(&ModelEntry, String)],
+    prompt: &str,
+    handle: ToolServerHandle,
+    params: &GenParams,
+) -> Result<CompletionOutcome, MvError> {
+    let chain_len = chain.len();
+    let mut attempts: Vec<(String, String)> = Vec::new();
+    for (entry, endpoint) in chain {
+        // In a multi-entry chain, skip an entry whose backend preflights `Dead`
+        // before building an agent. The big win is a dead Ollama: `complete`
+        // has no internal preflight there and would wait out rig's connect
+        // timeout. (Single-model chains skip this and go straight to `complete`
+        // so their real classified error — and existing tests — are unchanged.
+        // For TRT-LLM this overlaps `call_trtllm`'s own preflight; the extra
+        // probe on a *healthy* backend is one cheap GET.)
+        if chain_len > 1
+            && let PreflightStatus::Dead(e) = preflight(entry, endpoint, PREFLIGHT_TIMEOUT).await
+        {
+            warn!(model = %entry.id, error = %e, "model preflight reported dead, skipping");
+            attempts.push((entry.id.clone(), e.to_string()));
+            continue;
+        }
+        match complete(entry, endpoint, prompt, handle.clone(), params).await {
+            Ok(text) => {
+                let span = Span::current();
+                span.record("router.selected", entry.id.as_str());
+                let reason = if attempts.is_empty() {
+                    "primary"
+                } else {
+                    "fallback after primary failure"
+                };
+                span.record("router.reason", reason);
+                if !attempts.is_empty() {
+                    info!(
+                        model = %entry.id,
+                        skipped = attempts.len(),
+                        "completion served by fallback model"
+                    );
+                }
+                return Ok(CompletionOutcome {
+                    text,
+                    model_used: entry.id.clone(),
+                });
+            }
+            Err(e) if e.is_fallback_eligible() && chain_len > 1 => {
+                // Emit a span event per failed attempt so a trace shows the
+                // full walk, then advance to the next candidate.
+                warn!(model = %entry.id, error = %e, "model failed, trying next in chain");
+                attempts.push((entry.id.clone(), e.to_string()));
+                continue;
+            }
+            // Fail fast: either the error is not fallback-eligible, or there is
+            // no chain to fall back to (single model → surface its real error).
+            Err(e) => return Err(e),
+        }
+    }
+
+    Err(MvError::AllModelsFailed { attempts })
 }
 
 /// Dispatch a buffered completion to the entry's provider.
@@ -141,24 +282,6 @@ async fn call_openai(
     Ok(response)
 }
 
-/// Health-check the TRT-LLM proxy before building an agent. Shared by the
-/// buffered and streaming paths so the error wording cannot drift.
-async fn trtllm_preflight(endpoint: &str) -> Result<(), MvError> {
-    use mv_core::trtllm::health::HealthCheckResult;
-
-    match mv_core::trtllm::health::check_health(endpoint).await {
-        HealthCheckResult::Healthy => Ok(()),
-        HealthCheckResult::Unhealthy { status, body } => Err(MvError::BackendUnreachable {
-            endpoint: endpoint.to_string(),
-            hint: format!("Server returned {status}: {body}. {START_HINT}"),
-        }),
-        HealthCheckResult::Unreachable { error } => Err(MvError::BackendUnreachable {
-            endpoint: endpoint.to_string(),
-            hint: format!("TRT-LLM server not reachable ({error}). {START_HINT}"),
-        }),
-    }
-}
-
 /// Build the TRT-LLM agent (Chat Completions client, stop sequences,
 /// sampling params). Shared by the buffered and streaming paths.
 fn trtllm_agent(
@@ -207,7 +330,11 @@ async fn call_trtllm(
     handle: ToolServerHandle,
     params: &GenParams,
 ) -> Result<String, MvError> {
-    trtllm_preflight(endpoint).await?;
+    // Shared preflight: health + served-model check, the single source of the
+    // TRT-LLM reachability + not-loaded mapping (shared with the stream path).
+    if let PreflightStatus::Dead(e) = preflight(entry, endpoint, PREFLIGHT_TIMEOUT).await {
+        return Err(e);
+    }
 
     let model_name = entry.model_name();
     info!(model = %model_name, endpoint = %endpoint, locality = "local", "connecting to TRT-LLM");
@@ -249,22 +376,17 @@ pub async fn stream_trtllm(
     use rig::streaming::StreamedAssistantContent;
     use std::io::Write as _;
 
-    trtllm_preflight(endpoint).await?;
+    // One shared preflight covers both the health check and the served-model
+    // list. The latter matters most on the streaming path: rig's streaming
+    // layer swallows a proxy 502 (logs an SSE parse error, ends the turn
+    // empty), so without it an unloaded model would yield silent empty output
+    // and exit 0. A `Dead` status carries the `just load` / `trtllm-serve` hint.
+    if let PreflightStatus::Dead(e) = preflight(entry, endpoint, PREFLIGHT_TIMEOUT).await {
+        return Err(e);
+    }
 
     let model_name = entry.model_name();
     info!(model = %model_name, endpoint = %endpoint, locality = "local", "streaming from TRT-LLM");
-
-    // Preflight the served-model list. rig's streaming layer swallows a proxy
-    // 502 (logs an SSE parse error, ends the turn empty), so an unloaded model
-    // would otherwise yield silent empty output and exit 0. Only treat a
-    // definitive "not served" as an error; an indeterminate preflight (None)
-    // falls through to the stream attempt.
-    if mv_core::trtllm::health::served_model_present(endpoint, model_name).await == Some(false) {
-        return Err(MvError::ModelNotLoaded {
-            model: entry.id.clone(),
-            hint: format!("Run: just load {}", entry.id),
-        });
-    }
 
     let agent = trtllm_agent(entry, endpoint, handle, &GenParams::default())?;
 

@@ -1,0 +1,53 @@
+name: branch-example
+version: "1.0"
+description: >
+  Route a question to a deep or quick analysis based on the requested style.
+  Both arms define `analysis`, so it is available to the final step regardless
+  of which branch runs.
+
+defaults:
+  model: qwen3:4b
+
+inputs:
+  - name: topic
+    type: string
+    required: true
+    description: What to analyze
+  - name: style
+    type: enum
+    values: [detailed, brief]
+    default: brief
+    description: How thorough the analysis should be
+
+steps:
+  - id: route
+    name: Route by style
+    type: branch
+    # A minijinja expression over the context. With string-typed values,
+    # prefer explicit comparisons like this over bare truthiness.
+    condition: "style == 'detailed'"
+    then:
+      - id: deep
+        name: Deep analysis
+        type: prompt
+        output: analysis
+        template: "Give a thorough, multi-paragraph analysis of: {{topic}}"
+    else:
+      - id: quick
+        name: Quick analysis
+        type: prompt
+        output: analysis
+        template: "Give a one-sentence summary of: {{topic}}"
+
+  - id: format
+    name: Format the result
+    type: prompt
+    output: formatted
+    template: |
+      Format the following analysis as Markdown with a title:
+
+      {{analysis}}
+
+outputs:
+  - name: result
+    from: format

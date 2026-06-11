@@ -107,6 +107,11 @@ mv-cli -m llama-fp8 --stream --no-tools "Explain Rust ownership"  # Stream token
 > the **trt-llm-explore** repo's justfile (which manages the proxy), not
 > this repo's.
 
+> Fallback chains apply to buffered completions only. `--stream` keeps
+> single-model semantics — there is no mid-stream fallback (tokens already
+> shown can't be unshown), so a streamed prompt against a dead model surfaces
+> that model's error rather than advancing the chain.
+
 #### Workflows
 
 Define multi-step workflows in YAML and execute them from the CLI:
@@ -147,12 +152,26 @@ outputs:
     from: summarize
 ```
 
-Workflows support three step types: `prompt` (LLM calls), `tool`, and
-`transform`. Tool steps execute real tools — the same merged built-in + MCP
-tool set the agent sees — with skip/fail/retry error handling (retry
-re-attempts transient errors only, and re-runs side effects). `transform`
-currently supports a single operation, `extract_json`. Template variables use
-`{{var}}` syntax (minijinja) with step outputs shadowing workflow inputs.
+Workflows support five step types: `prompt` (LLM calls), `tool`, `transform`,
+and — since sprint 009 — `branch` and `parallel`. Tool steps execute real
+tools — the same merged built-in + MCP tool set the agent sees — with
+skip/fail/retry error handling (retry re-attempts transient errors only, and
+re-runs side effects). `transform` currently supports a single operation,
+`extract_json`. Template variables use `{{var}}` syntax (minijinja) with step
+outputs shadowing workflow inputs.
+
+`branch` runs one of two nested step lists based on a condition (a minijinja
+expression like `style == 'detailed'`); `parallel` runs its child steps
+concurrently, each against a snapshot of the context, merging their disjoint
+outputs at the join. See
+[`workflows/examples/branch-example.yaml`](workflows/examples/branch-example.yaml)
+and [`parallel-example.yaml`](workflows/examples/parallel-example.yaml), and
+[docs/06](docs/06-dsl-flow-management.md) for the semantics (including the
+maybe-defined-output rule for branches).
+
+A prompt step's `model:` may be a single id or a preference list
+(`model: { prefer: [qwen3:8b, gpt-4o-mini] }`); the first reachable model
+serves, and the substitution shows up in `--json` as `model_used`.
 
 ### Model Configuration
 
@@ -165,6 +184,10 @@ models:
     default: true
   - id: qwen3:8b
     provider: ollama
+    # Optional fallback chain: if qwen3:8b is unreachable or its model isn't
+    # loaded, try these in order (validated at load — ids must exist, no
+    # self-reference). Non-transitive: only this entry's own list is walked.
+    # fallback: [qwen3:4b]
   # TRT-LLM provider (start OpenAI proxy from trt-llm-explore first)
   # - id: llama-3_1-8b-fp8
   #   provider: trtllm
