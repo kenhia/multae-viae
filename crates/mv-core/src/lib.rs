@@ -91,6 +91,12 @@ pub struct ModelEntry {
     /// Optional cap on agentic tool-use turns per request.
     #[serde(default)]
     pub max_turns: Option<u32>,
+    /// Optional ordered list of model ids to try if this entry fails with a
+    /// fallback-eligible error. Non-transitive: only this entry's own list is
+    /// walked (a fallback's own `fallback` is ignored). Validated at registry
+    /// load: every id must exist and none may be this entry's own id.
+    #[serde(default)]
+    pub fallback: Option<Vec<String>>,
 }
 
 impl ModelEntry {
@@ -214,6 +220,30 @@ impl ModelRegistry {
             });
         }
 
+        // Fallback chains must reference real models and never point at
+        // themselves — an unknown or self-referencing id is a config mistake
+        // that would otherwise surface as a runtime surprise mid-prompt.
+        for m in &config.models {
+            let Some(chain) = &m.fallback else { continue };
+            for target in chain {
+                if target == &m.id {
+                    return Err(MvError::ConfigParseError {
+                        path: source.to_string(),
+                        details: format!("model '{}' lists itself in its fallback chain", m.id),
+                    });
+                }
+                if !seen.contains(target.as_str()) {
+                    return Err(MvError::ConfigParseError {
+                        path: source.to_string(),
+                        details: format!(
+                            "model '{}' fallback references unknown model '{target}'",
+                            m.id
+                        ),
+                    });
+                }
+            }
+        }
+
         Ok(Self {
             models: config.models,
         })
@@ -253,6 +283,7 @@ impl ModelRegistry {
                 expected_vram_gb: None,
                 stop_sequences: None,
                 max_turns: None,
+                fallback: None,
             }],
         }
     }
@@ -309,6 +340,12 @@ pub enum MvError {
     #[error("Model '{model}' not found in registry. Available: {available}")]
     ModelNotInRegistry { model: String, available: String },
 
+    #[error("every model in the fallback chain failed:\n{}", format_chain_attempts(.attempts))]
+    AllModelsFailed {
+        /// Ordered `(model_id, failure message)` pairs, one per attempt.
+        attempts: Vec<(String, String)>,
+    },
+
     #[error("API key required for {provider}. Set {env_var} environment variable.")]
     ApiKeyMissing { provider: String, env_var: String },
 
@@ -357,6 +394,16 @@ pub enum MvError {
 
     #[error("step '{step}': template error: {details}")]
     WorkflowTemplateError { step: String, details: String },
+}
+
+/// Render the per-attempt failure list for [`MvError::AllModelsFailed`] as one
+/// indented line per attempted model.
+fn format_chain_attempts(attempts: &[(String, String)]) -> String {
+    attempts
+        .iter()
+        .map(|(model, reason)| format!("  - {model}: {reason}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Validate a prompt string. Returns the trimmed prompt on success.
@@ -600,6 +647,7 @@ models:
             expected_vram_gb: None,
             stop_sequences: None,
             max_turns: None,
+            fallback: None,
         };
         assert_eq!(entry.locality(), Locality::Local);
     }
@@ -619,6 +667,7 @@ models:
             expected_vram_gb: None,
             stop_sequences: None,
             max_turns: None,
+            fallback: None,
         };
         assert_eq!(ollama.endpoint(), "http://localhost:11434");
 
@@ -635,6 +684,7 @@ models:
             expected_vram_gb: None,
             stop_sequences: None,
             max_turns: None,
+            fallback: None,
         };
         assert_eq!(openai.endpoint(), "https://api.openai.com/v1");
     }
@@ -709,6 +759,71 @@ models:
     }
 
     #[test]
+    fn all_models_failed_enumerates_attempts() {
+        let err = MvError::AllModelsFailed {
+            attempts: vec![
+                ("primary".to_string(), "backend unreachable".to_string()),
+                ("backup".to_string(), "not loaded".to_string()),
+            ],
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("primary: backend unreachable"), "got: {msg}");
+        assert!(msg.contains("backup: not loaded"), "got: {msg}");
+    }
+
+    #[test]
+    fn fallback_chain_valid_references_accepted() {
+        let yaml = r#"
+models:
+  - id: primary
+    provider: trtllm
+    fallback: [backup, cloud]
+  - id: backup
+    provider: ollama
+  - id: cloud
+    provider: openai
+"#;
+        let registry = ModelRegistry::from_yaml(yaml, "test").unwrap();
+        assert_eq!(
+            registry.get("primary").unwrap().fallback.as_deref(),
+            Some(["backup".to_string(), "cloud".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn fallback_unknown_model_rejected() {
+        let yaml = r#"
+models:
+  - id: primary
+    provider: trtllm
+    fallback: [ghost]
+  - id: backup
+    provider: ollama
+"#;
+        let err = ModelRegistry::from_yaml(yaml, "test").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("primary") && msg.contains("ghost"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn fallback_self_reference_rejected() {
+        let yaml = r#"
+models:
+  - id: primary
+    provider: trtllm
+    fallback: [primary]
+"#;
+        let err = ModelRegistry::from_yaml(yaml, "test").unwrap_err();
+        assert!(
+            err.to_string().contains("itself in its fallback chain"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
     fn effective_max_turns_default_and_explicit() {
         let yaml = "models:\n  - id: a\n    provider: ollama\n  - id: b\n    provider: ollama\n    max_turns: 3\n";
         let registry = ModelRegistry::from_yaml(yaml, "test").unwrap();
@@ -739,6 +854,7 @@ models:
             expected_vram_gb: None,
             stop_sequences: None,
             max_turns: None,
+            fallback: None,
         };
         assert_eq!(entry.endpoint(), "http://localhost:8003/v1");
     }
@@ -758,6 +874,7 @@ models:
             expected_vram_gb: None,
             stop_sequences: None,
             max_turns: None,
+            fallback: None,
         };
         assert_eq!(entry.model_name(), "meta-llama/Meta-Llama-3.1-8B-Instruct");
     }
@@ -777,6 +894,7 @@ models:
             expected_vram_gb: None,
             stop_sequences: None,
             max_turns: None,
+            fallback: None,
         };
         assert_eq!(entry.model_name(), "llama-fp8");
     }

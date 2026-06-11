@@ -247,22 +247,57 @@ reference [docs/fable/02-findings.md](fable/02-findings.md). Sprint directory:
 
 ---
 
-## Phase 5: Advanced Routing & RAG (Weeks 17-20)
+## Phase 5: Advanced Routing & DSL Composition (Weeks 17-19)
 
-**Goal**: Adaptive model routing and RAG integration.
+**Goal**: Resilient model routing — fallback chains, per-provider preflight,
+preference lists — and workflow composition via `branch` / `parallel` step types.
+
+RAG is split into its own Phase 5.5 per the post-007 review
+([docs/fable/03](fable/03-roadmap-recommendations.md) §Phase 5 amendments):
+the original Phase 5 was the heaviest on the roadmap and splits cleanly — RAG
+is genuinely new surface with no coupling to routing or the engine. Sequencing
+also follows the review: fallback *mechanism* before adaptive *policy*; adaptive
+scoring ([07-model-routing.md](07-model-routing.md) §2) moves to Phase 7 next to
+meta-routing rather than being co-designed with the chain mechanism. Sprint
+directory: `specs/009-routing-composition/`.
 
 ### Tasks
-- [ ] Implement adaptive model routing algorithm
-- [ ] Add hybrid routing with preference lists and fallbacks
+- [ ] `fallback: [id, …]` on `ModelEntry` (registry-validated) +
+      `complete_with_fallback()` driven by `is_fallback_eligible()`
+- [ ] Generalize `trtllm::health` to a per-provider
+      `preflight(entry) -> Healthy | Dead | Unknown` in mv-core; router skips
+      dead locals before burning an agent build
+- [ ] Hybrid routing: step-level `prefer: [id, …]` lists resolved through the
+      same chain mechanism (07-model-routing §3)
+- [ ] Add `branch` step type to DSL (maybe-defined output validation)
+- [ ] Add `parallel` step type to DSL (fork-join, snapshot isolation,
+      disjoint outputs validated at parse time)
+- [ ] Routing decisions in telemetry (`router.*` spans per 07-model-routing)
+
+### Deliverable
+- A prompt against a dead local backend transparently falls back to the next
+  model in the chain, with the decision visible in traces
+- Workflows branch on intermediate results and fan out independent steps
+  concurrently
+
+---
+
+## Phase 5.5: RAG Integration (Weeks 20-22)
+
+**Goal**: Retrieval-augmented generation — vector store, embedding pipeline,
+ingestion, and retrieval wired into agent workflows.
+
+Split out of Phase 5 (see above). See [08-rag-integration.md](08-rag-integration.md)
+for the design research.
+
+### Tasks
 - [ ] Set up Qdrant vector store (Docker)
 - [ ] Implement embedding pipeline (Ollama + nomic-embed-text)
 - [ ] Build RAG MCP server for network deployment
 - [ ] Integrate RAG context into agent workflows
 - [ ] Add document ingestion pipeline
-- [ ] Add `branch` and `parallel` step types to DSL
 
 ### Deliverable
-- Agent selects appropriate models based on task characteristics
 - Agent retrieves relevant context from RAG for knowledge-intensive tasks
 
 ---
@@ -296,7 +331,9 @@ reference [docs/fable/02-findings.md](fable/02-findings.md). Sprint directory:
 - [ ] Add Prometheus metrics endpoint
 - [ ] Expose WebSocket for real-time event streaming (for dashboard)
 - [ ] Controller as MCP server (expose capabilities to other AI tools)
-- [ ] Meta-routing experiments (model selects model)
+- [ ] Adaptive-scoring & meta-routing experiments (router scores candidates by
+      task metadata; model selects model) — policies layered on the Phase 5
+      fallback mechanism
 - [ ] Security hardening (API auth, tool sandboxing, secret management)
 - [ ] Documentation and examples
 - [ ] Begin companion dashboard project (separate repo)
@@ -314,7 +351,8 @@ Throughout implementation, these are the key learning opportunities:
 | 2 | Function calling, structured output, agentic patterns |
 | 3 | MCP protocol, inter-process communication, service architecture |
 | 4 | DSL design, template engines, workflow orchestration |
-| 5 | Embeddings, vector search, RAG tuning, routing algorithms |
+| 5 | Routing algorithms, failure classification, structured concurrency |
+| 5.5 | Embeddings, vector search, RAG tuning |
 | 6 | System programming, service architecture, state management |
 | 7 | Observability engineering, security, system design |
 

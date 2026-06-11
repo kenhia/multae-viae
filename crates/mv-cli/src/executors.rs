@@ -3,7 +3,7 @@
 
 use rig::tool::server::ToolServerHandle;
 
-use crate::providers::{GenParams, complete};
+use crate::providers::{GenParams, complete_with_fallback};
 
 /// Prompt executor that routes workflow prompt steps through the shared
 /// provider dispatch seam.
@@ -34,7 +34,10 @@ impl mv_core::workflow::engine::PromptExecutor for RigPromptExecutor {
             temperature,
             max_tokens,
         };
-        complete(
+        // Workflow prompt steps honor fallback chains too, via the same walker.
+        // The engine only needs the text; `model_used` is recorded on the trace.
+        complete_with_fallback(
+            &self.registry,
             entry,
             &entry.endpoint(),
             prompt_text,
@@ -42,6 +45,7 @@ impl mv_core::workflow::engine::PromptExecutor for RigPromptExecutor {
             &params,
         )
         .await
+        .map(|outcome| outcome.text)
     }
 }
 

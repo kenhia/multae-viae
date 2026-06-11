@@ -4,10 +4,19 @@
 
 use mv_core::providers::{SYSTEM_PREAMBLE, classify_backend_error, classify_prompt_error};
 use mv_core::trtllm::START_HINT;
-use mv_core::{ModelEntry, MvError, Provider};
+use mv_core::{ModelEntry, ModelRegistry, MvError, Provider};
 use rig::completion::Prompt;
 use rig::tool::server::ToolServerHandle;
-use tracing::{debug, info};
+use tracing::{Span, debug, info, warn};
+
+/// The result of a (possibly chained) completion: the response text plus the
+/// id of the model that actually served it — which may differ from the
+/// requested model when a fallback chain was walked.
+#[derive(Debug, Clone)]
+pub struct CompletionOutcome {
+    pub text: String,
+    pub model_used: String,
+}
 
 /// Optional sampling parameters forwarded to the provider (set by workflow
 /// steps; the plain prompt path uses provider defaults).
@@ -34,6 +43,81 @@ impl GenParams {
         }
         builder
     }
+}
+
+/// Walk `primary` and its fallback chain, returning the first success.
+///
+/// The chain is `[primary] + primary.fallback` (non-transitive — a fallback's
+/// own `fallback` list is not followed). `primary_endpoint` lets the caller
+/// override the primary's endpoint (the `--endpoint` flag / test injection);
+/// fallback entries always use their own resolved endpoint. Advancement is
+/// gated on [`MvError::is_fallback_eligible`]: a backend-dead or
+/// misconfiguration error tries the next entry, anything else (empty prompt,
+/// turn-limit, a completed-but-failed completion) fails fast. If every entry
+/// is exhausted, returns [`MvError::AllModelsFailed`] enumerating each attempt.
+#[tracing::instrument(name = "model_routing", skip_all, fields(
+    router.requested = %primary.id,
+    router.selected = tracing::field::Empty,
+    router.reason = tracing::field::Empty,
+))]
+pub async fn complete_with_fallback(
+    registry: &ModelRegistry,
+    primary: &ModelEntry,
+    primary_endpoint: &str,
+    prompt: &str,
+    handle: ToolServerHandle,
+    params: &GenParams,
+) -> Result<CompletionOutcome, MvError> {
+    // Resolve the chain up front. Fallback ids are registry-validated at load,
+    // so `get` is expected to hit; a missing entry is skipped defensively.
+    let mut chain: Vec<(&ModelEntry, String)> = vec![(primary, primary_endpoint.to_string())];
+    if let Some(ids) = &primary.fallback {
+        for id in ids {
+            if let Some(entry) = registry.get(id) {
+                chain.push((entry, entry.endpoint()));
+            }
+        }
+    }
+    let chain_len = chain.len();
+
+    let mut attempts: Vec<(String, String)> = Vec::new();
+    for (entry, endpoint) in chain {
+        match complete(entry, &endpoint, prompt, handle.clone(), params).await {
+            Ok(text) => {
+                let span = Span::current();
+                span.record("router.selected", entry.id.as_str());
+                let reason = if attempts.is_empty() {
+                    "primary"
+                } else {
+                    "fallback after primary failure"
+                };
+                span.record("router.reason", reason);
+                if !attempts.is_empty() {
+                    info!(
+                        model = %entry.id,
+                        skipped = attempts.len(),
+                        "completion served by fallback model"
+                    );
+                }
+                return Ok(CompletionOutcome {
+                    text,
+                    model_used: entry.id.clone(),
+                });
+            }
+            Err(e) if e.is_fallback_eligible() && chain_len > 1 => {
+                // Emit a span event per failed attempt so a trace shows the
+                // full walk, then advance to the next candidate.
+                warn!(model = %entry.id, error = %e, "model failed, trying next in chain");
+                attempts.push((entry.id.clone(), e.to_string()));
+                continue;
+            }
+            // Fail fast: either the error is not fallback-eligible, or there is
+            // no chain to fall back to (single model → surface its real error).
+            Err(e) => return Err(e),
+        }
+    }
+
+    Err(MvError::AllModelsFailed { attempts })
 }
 
 /// Dispatch a buffered completion to the entry's provider.

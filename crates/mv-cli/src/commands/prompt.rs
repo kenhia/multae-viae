@@ -5,7 +5,7 @@ use tracing::{debug, info};
 
 use crate::cli::PromptArgs;
 use crate::commands::connect_mcp_servers;
-use crate::providers::{GenParams, complete, stream_trtllm};
+use crate::providers::{CompletionOutcome, GenParams, complete_with_fallback, stream_trtllm};
 use mv_core::Provider;
 
 #[tracing::instrument(name = "mv_cli_request", skip(args), fields(
@@ -14,9 +14,9 @@ use mv_core::Provider;
 ))]
 pub async fn run_prompt(
     args: &PromptArgs,
-    _json: bool,
+    json: bool,
     effective_stream: bool,
-) -> std::result::Result<String, mv_core::MvError> {
+) -> std::result::Result<CompletionOutcome, mv_core::MvError> {
     let prompt = mv_core::validate_prompt(&args.prompt)?;
 
     // Load model registry
@@ -84,10 +84,18 @@ pub async fn run_prompt(
         connect_mcp_servers(args.mcp_config.as_deref(), &agent_handle).await?
     };
 
+    // Streaming keeps single-model semantics — no mid-stream fallback (tokens
+    // already shown can't be unshown), so it bypasses the chain walker.
     let result = if stream_trtllm_path {
-        stream_trtllm(entry, &endpoint, prompt, agent_handle).await
+        stream_trtllm(entry, &endpoint, prompt, agent_handle)
+            .await
+            .map(|text| CompletionOutcome {
+                text,
+                model_used: entry.id.clone(),
+            })
     } else {
-        complete(
+        complete_with_fallback(
+            &registry,
             entry,
             &endpoint,
             prompt,
@@ -100,7 +108,16 @@ pub async fn run_prompt(
     // Always shut down MCP connections, even on error
     mv_core::mcp::client::shutdown_all(mcp_connections).await;
 
-    let response = result?;
-    info!(len = response.len(), "received response");
-    Ok(response)
+    let outcome = result?;
+    info!(len = outcome.text.len(), model_used = %outcome.model_used, "received response");
+
+    // Surface a fallback in text mode (JSON carries `model_used` instead).
+    if !json && outcome.model_used != entry.id {
+        eprintln!(
+            "note: '{}' was unavailable; this response was served by fallback model '{}'",
+            entry.id, outcome.model_used
+        );
+    }
+
+    Ok(outcome)
 }

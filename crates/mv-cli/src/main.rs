@@ -11,13 +11,17 @@ mod telemetry;
 use clap::Parser;
 
 use cli::{Cli, Commands, WorkflowAction};
+use providers::CompletionOutcome;
 
-fn print_success(response: &str, json: bool) {
+fn print_success(outcome: &CompletionOutcome, json: bool) {
     if json {
-        let obj = serde_json::json!({ "response": response });
+        let obj = serde_json::json!({
+            "response": outcome.text,
+            "model_used": outcome.model_used,
+        });
         println!("{}", obj);
     } else {
-        print!("{response}");
+        print!("{}", outcome.text);
     }
 }
 
@@ -72,8 +76,8 @@ async fn main() {
                 args.stream
             };
             match commands::prompt::run_prompt(args, cli.json, effective_stream).await {
-                Ok(response) => {
-                    print_success(&response, cli.json);
+                Ok(outcome) => {
+                    print_success(&outcome, cli.json);
                     Ok(())
                 }
                 Err(err) => Err(err),
