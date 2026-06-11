@@ -197,7 +197,41 @@ $ cargo run -p mv-cli -- -m llama-fp8 --stream --no-tools "Explain Rust ownershi
 
 ---
 
-## Phase 5: Advanced Routing & RAG (Weeks 15-18)
+## Phase 4.6: Consolidation (Weeks 15-16)
+
+**Goal**: Make the shipped feature set true, tested, and load-bearing before Phase 5
+builds on it. No new features.
+
+Driven by the post-007 review in [docs/fable/](fable/README.md); finding IDs (F1–F34)
+reference [docs/fable/02-findings.md](fable/02-findings.md). Sprint directory:
+`specs/008-consolidation/`.
+
+### Tasks
+- [ ] Correctness (F1–F10): UTF-8 truncation panic, real workflow `ToolExecutor`,
+      wire `temperature`/`max_tokens`, retry-config panic, shell child-process leak,
+      shell exit-status visibility, MCP output truncation, silent default-model
+      substitution, max-turns classification, `--json` error channel
+- [ ] Phase-5 seam (F11–F14): extract `complete()` dispatch, typed error
+      classification in `mv-core` + `is_fallback_eligible()`, `Provider` enum,
+      `ModelRegistry` validation
+- [ ] Engine prep (F15–F18): extract `execute_step`/`execute_steps`, encapsulate
+      `ExecutionContext`, `Send` bounds on executor traits, one template language,
+      output-collision validation; decide the String→Value context migration
+- [ ] `ToolPolicy` seam, default-allow (F19)
+- [ ] Test infrastructure (F25–F28): wiremock fake-proxy fixture, fake stdio MCP
+      server, hermetic CLI tests, end-to-end workflow test
+- [ ] Docs truth pass (F29–F34): README quickstart, docs/01 refresh, docs/06
+      not-implemented tags, spec hygiene
+
+### Deliverable
+- Every feature claimed by README/docs works as documented
+- `just ci` exercises a successful model call and a full workflow hermetically
+- Phase 5 fallback/routing has a single dispatch seam and machine-readable
+  failure classes to build on
+
+---
+
+## Phase 5: Advanced Routing & RAG (Weeks 17-20)
 
 **Goal**: Adaptive model routing and RAG integration.
 
@@ -217,7 +251,7 @@ $ cargo run -p mv-cli -- -m llama-fp8 --stream --no-tools "Explain Rust ownershi
 
 ---
 
-## Phase 6: Always-On Agent (Weeks 19-22)
+## Phase 6: Always-On Agent (Weeks 21-24)
 
 **Goal**: Long-running agent service with API and monitoring capabilities.
 
@@ -237,7 +271,7 @@ $ cargo run -p mv-cli -- -m llama-fp8 --stream --no-tools "Explain Rust ownershi
 
 ---
 
-## Phase 7: Polish & Dashboard Foundation (Weeks 23+)
+## Phase 7: Polish & Dashboard Foundation (Weeks 25+)
 
 **Goal**: Production-grade telemetry export and dashboard-ready APIs.
 
