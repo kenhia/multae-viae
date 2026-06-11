@@ -1,5 +1,13 @@
 # Model Routing Strategies
 
+> **Implementation status (sprint 009).** Prescriptive routing (§1) and hybrid
+> routing (§3 — `prefer:` lists + `fallback:` chains + per-provider preflight)
+> are **shipped**. Adaptive routing (§2) and the scoring/cost/meta-routing
+> machinery below are **not yet implemented — planned Phase 7**, layered on the
+> shipped fallback mechanism. The `TaskMetadata`/`ModelRegistry`/`CostTracker`
+> structs in this document are design sketches for that work, not the current
+> types (the real registry is in `crates/mv-core/src/lib.rs`).
+
 ## The Problem
 
 Different tasks benefit from different models. A code generation task may
@@ -9,7 +17,7 @@ decides which model to use for each step.
 
 ## Three Routing Strategies
 
-### 1. Prescriptive Routing
+### 1. Prescriptive Routing **(shipped)**
 
 The workflow DSL explicitly specifies which model to use for each step. No
 intelligence in the router — it's a simple lookup.
@@ -26,7 +34,7 @@ steps:
 **Cons**: Rigid, doesn't adapt to availability or load
 **Best for**: Production workflows where consistency matters
 
-### 2. Adaptive Routing
+### 2. Adaptive Routing **(planned — Phase 7)**
 
 The router selects the model based on task metadata, available models, and
 runtime conditions. The DSL provides constraints and hints, but the router
@@ -51,21 +59,30 @@ steps:
 **Cons**: Less predictable, harder to debug, may choose suboptimally
 **Best for**: Exploration, learning, general-purpose agent mode
 
-### 3. Hybrid Routing
+### 3. Hybrid Routing **(shipped — sprint 009)**
 
-The DSL provides a preference list and constraints. The router tries the
-preferred models in order, falling back based on availability and constraints.
+The DSL provides a preference list; the router tries the preferred models in
+order, skipping a backend that fails a cheap preflight (dead local) or returns
+a fallback-eligible error, and serving from the first that succeeds. Each
+preferred id also honors its own `fallback:` chain declared in `models.yaml`.
 
 ```yaml
+# models.yaml — an entry can declare its own fallback chain
+models:
+  - id: qwen3:8b
+    provider: ollama
+    fallback: [gpt-4o-mini]      # tried if qwen3:8b is unreachable
+
+# workflow step — a preference list resolved through the same mechanism
 steps:
   - id: analyze
     type: prompt
     model:
       prefer: [qwen3:8b, llama3.1:8b]
-      fallback: gpt-4
-      constraints:
-        max_latency_ms: 5000
 ```
+
+Per-step latency/constraint gating (`max_latency_ms`, etc.) is **not yet
+implemented** — it belongs with the adaptive scoring work in Phase 7.
 
 **Pros**: Best of both worlds — predictable preferences with graceful fallback
 **Cons**: More complex configuration
@@ -279,30 +296,23 @@ impl ModelRouter {
 
 ## Telemetry for Routing
 
-Every routing decision should be traced:
+Routing is traced today by the `model_routing` span in
+`crates/mv-cli/src/providers.rs` (`complete_chain`), which records:
 
 ```rust
-#[tracing::instrument(
-    name = "router.select",
-    fields(
-        router.strategy = %strategy,
-        router.candidates = %candidates.len(),
-        router.selected = tracing::field::Empty,
-        router.reason = tracing::field::Empty,
-        router.scores = tracing::field::Empty,
-    )
-)]
-async fn select(&self, ...) -> Result<ModelSelection> {
-    // ... routing logic ...
-    
-    let span = tracing::Span::current();
-    span.record("router.selected", &selection.model.as_str());
-    span.record("router.reason", &selection.reason.as_str());
-}
+#[tracing::instrument(name = "model_routing", skip_all, fields(
+    router.requested = /* first candidate id */,
+    router.selected = tracing::field::Empty,   // recorded on success
+    router.reason   = tracing::field::Empty,   // "primary" | "fallback after primary failure"
+))]
 ```
 
+On success it records `router.selected` (the model that served) and
+`router.reason`; each skipped/failed candidate emits a `warn` span event naming
+the model and its error, so a trace shows the full walk. Phase 7 adaptive
+routing will add `router.strategy`, `router.candidates`, and `router.scores`.
+
 This enables the dashboard to show:
-- Which models were considered for each step
-- Why a particular model was chosen
-- How routing decisions correlate with output quality
-- Cost breakdown by model over time
+- Which models were attempted for each step (per-attempt events)
+- Why a particular model was chosen (`router.reason`)
+- (Phase 7) scoring inputs and cost breakdown by model over time

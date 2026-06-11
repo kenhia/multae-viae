@@ -50,18 +50,27 @@ The DSL engine is implemented as a module within `mv-core` and has **no
 dependency on Rig or any provider** — it is generic over `PromptExecutor` /
 `ToolExecutor` traits (both `Send`-bounded) and unit-tested with mocks:
 
-- `types.rs` — Workflow, Step (prompt/tool/transform), Input, Output types
-  with `#[serde(deny_unknown_fields)]` for strict YAML parsing
+- `types.rs` — Workflow, Step (prompt/tool/transform/branch/parallel), Input,
+  Output, and `ModelSpec` (`Single` | `Prefer`) types with
+  `#[serde(deny_unknown_fields)]` for strict YAML parsing. `Step` is recursive
+  (branch/parallel own nested step lists); `Step::output()` is `Option` since
+  control-flow steps have no single output
 - `parser.rs` — YAML loading via `serde_yml` with error mapping
-- `validate.rs` — Structural validation (duplicate step IDs, duplicate
-  output names, unresolvable refs, circular references, retry config,
-  template syntax/reference checks via minijinja — including
-  `template_file` contents)
+- `validate.rs` — Structural validation via a recursive walk (duplicate step
+  IDs, duplicate output names, unresolvable refs, circular references, retry
+  config, template syntax/reference checks via minijinja — including
+  `template_file` contents). For `branch`: condition syntax + **maybe-defined**
+  analysis (an output is available afterward only if every arm defines it). For
+  `parallel`: sibling outputs are invisible (validated against the pre-fork
+  context) and must be disjoint
 - `template.rs` — Variable interpolation using `minijinja` with
-  `{{variable}}` syntax; supports inline templates and external template files
-- `engine.rs` — Sequential execution engine; an encapsulated
-  `ExecutionContext` where step outputs shadow workflow inputs; the default
-  model is a required parameter (no hardcoded fallback)
+  `{{variable}}` syntax; plus `evaluate_condition`/`condition_references` for
+  `branch` conditions (minijinja expressions, one engine for both)
+- `engine.rs` — Execution engine; an encapsulated `ExecutionContext` where step
+  outputs shadow workflow inputs; the default model is a required parameter (no
+  hardcoded fallback). `branch` recurses into the chosen arm; `parallel`
+  fork-joins children via `futures::future::join_all`, each against a context
+  snapshot, merging disjoint outputs at the join
 - `retry.rs` — skip/fail/retry error strategies; retry re-attempts only
   transient (`is_retryable()`) errors, with configurable `base_delay_ms`,
   exponential or fixed backoff, and a 30s delay cap
@@ -78,19 +87,20 @@ trait WorkflowEngine {
 }
 ```
 
-#### Model Router *(future — Phase 5)*
+#### Model Router
 
-Will select the appropriate model for each task. Sprint 008 laid the
-groundwork: a single `complete()` dispatch seam in `mv-cli/src/providers.rs`,
-typed error classification in `mv_core::providers`, and
-`MvError::is_fallback_eligible()` so a fallback chain can distinguish
-backend-dead failures from user errors. Planned modes:
+Selects the model for each step. Sprint 009 shipped the mechanism on the
+Sprint 008 seam (`complete()` dispatch + `is_fallback_eligible()`):
 
-1. **Prescriptive**: DSL specifies exact model per step
-2. **Adaptive**: Router selects based on task metadata (complexity, domain,
-   latency requirements)
-3. **Hybrid**: DSL provides constraints/preferences, router selects within those
-   bounds
+1. **Prescriptive** *(shipped)*: DSL specifies an exact model per step
+2. **Hybrid** *(shipped, sprint 009)*: a step `model: { prefer: [...] }` list
+   and/or a `fallback: [...]` chain on a `models.yaml` entry, walked by
+   `complete_chain()` in `mv-cli/src/providers.rs` — the first reachable model
+   serves. `mv_core::preflight` skips dead locals before an agent is built; the
+   substitution surfaces via a stderr note, the `--json` `model_used` field, and
+   `router.*` span attributes
+3. **Adaptive** *(future — Phase 7)*: router selects based on task metadata
+   (complexity, domain, latency), layered on the same mechanism
 
 See [07 — Model Routing](07-model-routing.md) for detailed strategies.
 
@@ -294,6 +304,7 @@ multae-viae/
 │   │       │   ├── file_read.rs
 │   │       │   ├── shell_exec.rs
 │   │       │   └── http_get.rs
+│   │       ├── preflight.rs # per-provider liveness probe (Healthy/Dead/Unknown)
 │   │       ├── trtllm/      # health.rs, stop.rs, usage.rs
 │   │       └── workflow/    # DSL engine (rig-free)
 │   │           ├── types.rs / parser.rs / validate.rs / template.rs
@@ -302,7 +313,7 @@ multae-viae/
 │   │   └── src/
 │   │       ├── main.rs      # Output contract (stdout/stderr × --json), dispatch
 │   │       ├── cli.rs       # clap definitions
-│   │       ├── providers.rs # complete() — the single provider dispatch seam
+│   │       ├── providers.rs # complete() seam + complete_chain() fallback walker
 │   │       ├── telemetry.rs # tracing + OTLP-HTTP exporter wiring
 │   │       ├── executors.rs # RigPromptExecutor / HandleToolExecutor
 │   │       └── commands/    # prompt.rs, workflow.rs
@@ -312,7 +323,7 @@ multae-viae/
 └── workflows/              # Example workflow YAML files
 ```
 
-## Current Implementation (through Sprint 008)
+## Current Implementation (through Sprint 009)
 
 The CLI operates as an agentic system with built-in tools (Sprint 003). The
 architecture uses Rig's native multi-turn agent loop — tools are registered with
@@ -340,6 +351,14 @@ Subsequent sprints layered on:
   `ToolPolicy` seam for Phase 7 sandboxing; new `MvError` variants
   (`MaxTurnsExceeded`, `ToolCallFailed`, `WorkflowStepError`,
   `ConfigNotFound`); `--json` errors print to stderr (channel unchanged).
+- **Sprint 009 — routing & DSL composition**: `fallback: [...]` chains on
+  `ModelEntry` and step-level `model: { prefer: [...] }` lists, both walked by
+  `complete_chain()` (advance on `is_fallback_eligible()` errors, fail fast
+  otherwise); per-provider `mv_core::preflight` skips dead locals; the
+  substitution surfaces via stderr note / `--json` `model_used` / `router.*`
+  spans. New DSL steps `branch` (minijinja-expression condition, maybe-defined
+  validation) and `parallel` (fork-join, snapshot isolation, disjoint outputs).
+  New `MvError` variants (`AllModelsFailed`, `WorkflowParallelFailed`).
 
 ### Tool Architecture
 

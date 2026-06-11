@@ -182,18 +182,22 @@ through arms.
 
 ## Phase 6: WS6 — Docs truth pass (polish)
 
-- [ ] T021 [P] [WS6] docs/06: drop "Not yet implemented" tags for
+- [X] T021 [P] [WS6] docs/06: drop "Not yet implemented" tags for
   `branch`/`parallel`/model-preference; document condition semantics
   (minijinja expression, string-typed until the Value migration), the
   maybe-defined rule, parallel snapshot isolation + aggregated failure;
-  refresh the Evolution Path list (FR-012)
-- [ ] T022 [P] [WS6] docs/07: mark §3 Hybrid shipped (sprint 009), §2 Adaptive
+  refresh the Evolution Path list (FR-012). *Also fixed the stale `branch`
+  example (was `condition: "{{...}} > 0.8"` — wrong for bare expressions) and
+  the `parallel` example (dropped the non-existent `output:` map).*
+- [X] T022 [P] [WS6] docs/07: mark §3 Hybrid shipped (sprint 009), §2 Adaptive
   deferred to Phase 7; align telemetry section with the shipped `router.*`
-  attributes (FR-012)
-- [ ] T023 [P] [WS6] docs/01 refresh through sprint 009 (preflight module,
+  attributes (FR-012). *Added an implementation-status callout up top; noted
+  the `TaskMetadata`/`CostTracker` structs are Phase 7 design sketches.*
+- [X] T023 [P] [WS6] docs/01 refresh through sprint 009 (preflight module,
   fallback walker, recursive steps); README: `fallback:` in models.yaml
-  example, fallback notice behavior, `--stream` limitation (FR-012)
-- [ ] T024 [WS6] Update `docs/09-roadmap.md` Phase 5 checkboxes + lessons
-  learned (after merge)
+  example, fallback notice behavior, `--stream` limitation (FR-012).
+- [X] T024 [WS6] Update `docs/09-roadmap.md` Phase 5 checkboxes + lessons
+  learned. *Done pre-merge; the WS6 docs are part of "done" per the
+  constitution.*
 
 **Checkpoint**: SC-001–SC-005 met; sprint shippable.

@@ -262,23 +262,48 @@ meta-routing rather than being co-designed with the chain mechanism. Sprint
 directory: `specs/009-routing-composition/`.
 
 ### Tasks
-- [ ] `fallback: [id, …]` on `ModelEntry` (registry-validated) +
-      `complete_with_fallback()` driven by `is_fallback_eligible()`
-- [ ] Generalize `trtllm::health` to a per-provider
+- [x] `fallback: [id, …]` on `ModelEntry` (registry-validated) +
+      `complete_with_fallback()` driven by `is_fallback_eligible()` (WS1)
+- [x] Generalize `trtllm::health` to a per-provider
       `preflight(entry) -> Healthy | Dead | Unknown` in mv-core; router skips
-      dead locals before burning an agent build
-- [ ] Hybrid routing: step-level `prefer: [id, …]` lists resolved through the
-      same chain mechanism (07-model-routing §3)
-- [ ] Add `branch` step type to DSL (maybe-defined output validation)
-- [ ] Add `parallel` step type to DSL (fork-join, snapshot isolation,
-      disjoint outputs validated at parse time)
-- [ ] Routing decisions in telemetry (`router.*` spans per 07-model-routing)
+      dead locals before burning an agent build (WS2)
+- [x] Hybrid routing: step-level `prefer: [id, …]` lists resolved through the
+      same chain mechanism (07-model-routing §3) (WS5)
+- [x] Add `branch` step type to DSL (maybe-defined output validation) (WS3)
+- [x] Add `parallel` step type to DSL (fork-join, snapshot isolation,
+      disjoint outputs validated at parse time) (WS4)
+- [x] Routing decisions in telemetry (`router.*` spans per 07-model-routing) (WS1)
 
 ### Deliverable
 - A prompt against a dead local backend transparently falls back to the next
   model in the chain, with the decision visible in traces
 - Workflows branch on intermediate results and fan out independent steps
   concurrently
+
+### Lessons Learned
+- The 008 seam paid off exactly as intended: fallback was a *wrapper* over the
+  existing `complete()` — `complete_chain()` walks a candidate list, and both
+  `complete_with_fallback` (a model + its `fallback`) and step `prefer:` lists
+  build a list and hand it over. No second routing path, no dyn abstraction.
+- `PreflightStatus::Dead(MvError)` (carrying the exact error, not a string)
+  let one probe serve both the router (record it) and the TRT-LLM call paths
+  (return it) without losing the `just load` / `trtllm-serve` hints — the kind
+  of detail that decides whether a "unify the seam" refactor actually unifies.
+- rig surfaces an HTTP 500 as `HttpError`, which classifies to
+  `BackendUnreachable` (fallback-*eligible*). Triggering a genuinely
+  *ineligible* error hermetically meant a 200-with-no-`choices` body, not a 5xx
+  — a reminder that the proxy contract is informal and the wiremock fixture is
+  the only place it's pinned.
+- The recursive `Step` shape was the real cost of branch+parallel: `output()`
+  became `Option`, and every walk (engine, validator, id/output collection,
+  `outputs` mapping) had to recurse. Doing `branch` first (WS3) and letting
+  `parallel` (WS4) extend the same walk kept each diff small — the maybe-defined
+  set-algebra and the sibling-invisible/disjoint rules are the same walk with
+  different "what's available" rules (arm intersection vs. pre-fork snapshot).
+- `futures::future::join_all` on the current task (not `tokio::spawn`) kept
+  parallel children borrowing `&P`/`&T` without `'static` gymnastics; the
+  `Barrier` + `timeout` rendezvous test is what actually proves concurrency
+  rather than asserting it.
 
 ---
 

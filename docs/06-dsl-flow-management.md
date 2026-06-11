@@ -160,12 +160,17 @@ are rejected at validation.
   output: structured_data
 ```
 
-#### `branch` — Conditional Execution **(Not yet implemented — planned Phase 5/6)**
+#### `branch` — Conditional Execution **(shipped — sprint 009)**
+
+`condition` is a **minijinja expression** (the same template language as
+`{{…}}`, but written bare — no surrounding braces) evaluated against the
+context. The `then` arm runs when it is truthy; the optional `else` arm runs
+otherwise. Arms may nest further `branch`/`parallel` steps.
 
 ```yaml
-- id: check_complexity
+- id: route
   type: branch
-  condition: "{{analysis.complexity}} > 0.8"
+  condition: "style == 'detailed'"   # bare expression, not {{...}}
   then:
     - id: deep_dive
       type: prompt
@@ -180,7 +185,26 @@ are rejected at validation.
       output: detailed_analysis
 ```
 
-#### `parallel` — Concurrent Execution **(Not yet implemented — planned Phase 5/6)**
+**Maybe-defined outputs.** Validation tracks which outputs are *definitely*
+defined after a branch: an output is only available afterward if **every** arm
+defines it (a missing `else` defines nothing). Referencing an output defined in
+just one arm is a validation error — that is why both arms above write
+`detailed_analysis`.
+
+**Truthiness caveat.** Context values are strings today, so a bare
+`condition: "flag"` is truthy whenever the string is non-empty — the literal
+string `"false"` is truthy. Prefer explicit comparisons
+(`condition: "flag == 'on'"`). Typed values arrive with the Phase 6 `Value`
+context migration.
+
+#### `parallel` — Concurrent Execution **(shipped — sprint 009)**
+
+Child steps run **concurrently** (fork-join). Each child executes against an
+immutable snapshot of the context taken at the fork, so a child **cannot see a
+sibling's output** (referencing one is a validation error); child outputs must
+be **disjoint** and merge back into the context at the join, where all of them
+become available to later steps. All children run to completion; if any fail,
+the step reports every failure.
 
 ```yaml
 - id: multi_search
@@ -188,17 +212,15 @@ are rejected at validation.
   steps:
     - id: search_web
       type: tool
-      tool: web_search
-      inputs: { query: "{{topic}}" }
+      tool: http_get
+      inputs: { url: "{{web_query_url}}" }
       output: web_results
     - id: search_docs
       type: tool
-      tool: rag_search
-      inputs: { query: "{{topic}}" }
+      tool: file_read
+      inputs: { path: "{{docs_path}}" }
       output: doc_results
-  output:
-    web: web_results
-    docs: doc_results
+# After the join, both `web_results` and `doc_results` are in the context.
 ```
 
 #### `loop` — Iterative Execution **(Not yet implemented — planned Phase 5/6)**
@@ -234,21 +256,26 @@ are rejected at validation.
 
 ### Model Specification
 
-**Implemented today**: an exact model id string, resolved against the
-`models.yaml` registry. A step naming an unregistered model fails with
-`ModelNotInRegistry` — there is no silent default substitution.
-Preference lists, adaptive strategies, and constraints below are
-**not yet implemented — planned Phase 5**.
+**Implemented today** (sprint 009): an exact model id string, **or** a
+`prefer:` list. Both resolve against the `models.yaml` registry; a step naming
+an unregistered model (or `prefer` entry) fails with `ModelNotInRegistry`
+before the run starts — there is no silent default substitution.
+
+A `prefer:` list resolves through the fallback-chain mechanism: the first
+reachable model serves the step, advancing past a backend that is dead or
+returns a fallback-eligible error (and each preferred id still honors its own
+`fallback:` chain from `models.yaml`). Adaptive strategies and constraints
+remain **not yet implemented — planned Phase 7** (layered on this mechanism).
 
 ```yaml
-# Exact model (the only implemented form)
+# Exact model
 model: qwen3:8b
 
-# Preferred list with fallback (Not yet implemented — planned Phase 5)
+# Preferred list — try in order, first reachable serves (shipped, sprint 009)
 model:
   prefer: [qwen3:8b, llama3.1:8b, gpt-4]
-  
-# Adaptive selection with constraints (Not yet implemented — planned Phase 5)
+
+# Adaptive selection with constraints (Not yet implemented — planned Phase 7)
 model:
   strategy: adaptive          # prescriptive | adaptive | hybrid
   constraints:
@@ -259,12 +286,6 @@ model:
   hints:
     domain: code               # code | general | reasoning | creative
     complexity: high
-
-# Prescriptive per environment (Not yet implemented — planned Phase 5)
-model:
-  strategy: prescriptive
-  local: qwen3:8b
-  cloud: gpt-4
 ```
 
 ### Prompt Templates
@@ -328,13 +349,18 @@ enum Step {
     Tool(ToolStep),
     #[serde(rename = "transform")]
     Transform(TransformStep),
-    // Planned Phase 5/6: Branch, Parallel, Loop, SubWorkflow
+    #[serde(rename = "branch")]
+    Branch(BranchStep),       // shipped, sprint 009
+    #[serde(rename = "parallel")]
+    Parallel(ParallelStep),   // shipped, sprint 009
+    // Planned Phase 6: Loop, SubWorkflow
 }
 ```
 
-The implemented types live in `crates/mv-core/src/workflow/types.rs`; the
-model is a plain `String` (a `ModelSpec` enum like the one sketched in
-"Model Specification" arrives with Phase 5 routing).
+The implemented types live in `crates/mv-core/src/workflow/types.rs`. A prompt
+step's `model` is a `ModelSpec` (untagged `Single(String)` | `Prefer { prefer:
+Vec<String> }`); `Step::output()` returns `Option<&str>` because `branch` and
+`parallel` are control-flow steps with no single output of their own.
 
 ### Validation
 
@@ -354,7 +380,17 @@ Workflows are validated structurally after parsing
   inside tool-step input values
 - Transform `operation` is a known transform (`extract_json`)
 - Retry config: `max_attempts >= 1`
-- Workflow `outputs[].from` references an existing step
+- Workflow `outputs[].from` references an existing step (top-level or nested
+  in a branch/parallel)
+- `branch`: the `condition` compiles as a minijinja expression and its
+  variables resolve; the `then` arm is non-empty; **maybe-defined analysis** —
+  an output is only available after the branch if every arm defines it
+- `parallel`: children are validated against the pre-fork context only (a
+  reference to a sibling's output fails); child outputs must be disjoint; the
+  step has at least one child
+- Step ids and output names are checked across the whole tree (branch/parallel
+  arms included); the same output name in a branch's `then` and `else` is the
+  recommended pattern, not a duplicate
 
 **Not checked**: tool names. A `tool:` value is only resolved at runtime
 against the merged built-in + MCP tool set — a typo'd tool name passes
@@ -392,7 +428,9 @@ never disagree). Options considered:
 
 1. **Phase 1 (MVP)**: Sequential steps, exact models, inline templates —
    **shipped** (sprints 005–008, plus `template_file`, transforms, and retry)
-2. **Phase 2**: Branching, parallel execution, model preferences
-3. **Phase 3**: Adaptive model routing, loop constructs, nested workflows
-4. **Phase 4**: Event triggers, conditional execution, runtime overrides
-5. **Phase 5**: Visual editor in the dashboard project
+2. **Branching, parallel execution, model preference lists** —
+   **shipped** (sprint 009)
+3. **Adaptive model routing, loop constructs, nested workflows** — adaptive
+   routing in Phase 7; `loop` and nested `workflow` steps in Phase 6
+4. **Event triggers, runtime overrides** — Phase 6+
+5. **Visual editor** in the dashboard project
