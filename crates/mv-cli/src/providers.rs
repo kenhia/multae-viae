@@ -2,12 +2,19 @@
 //! rig agent call. Both the prompt command and the workflow executor route
 //! through [`complete`]; Phase 5 fallback chains will call it in a loop.
 
+use std::time::Duration;
+
+use mv_core::preflight::{PreflightStatus, preflight};
 use mv_core::providers::{SYSTEM_PREAMBLE, classify_backend_error, classify_prompt_error};
 use mv_core::trtllm::START_HINT;
 use mv_core::{ModelEntry, ModelRegistry, MvError, Provider};
 use rig::completion::Prompt;
 use rig::tool::server::ToolServerHandle;
 use tracing::{Span, debug, info, warn};
+
+/// Network timeout for a preflight probe — short, so the router never blocks on
+/// a hung host before falling back.
+const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The result of a (possibly chained) completion: the response text plus the
 /// id of the model that actually served it — which may differ from the
@@ -82,6 +89,20 @@ pub async fn complete_with_fallback(
 
     let mut attempts: Vec<(String, String)> = Vec::new();
     for (entry, endpoint) in chain {
+        // In a multi-entry chain, skip an entry whose backend preflights `Dead`
+        // before building an agent. The big win is a dead Ollama: `complete`
+        // has no internal preflight there and would wait out rig's connect
+        // timeout. (Single-model chains skip this and go straight to `complete`
+        // so their real classified error — and existing tests — are unchanged.
+        // For TRT-LLM this overlaps `call_trtllm`'s own preflight; the extra
+        // probe on a *healthy* backend is one cheap GET.)
+        if chain_len > 1
+            && let PreflightStatus::Dead(e) = preflight(entry, &endpoint, PREFLIGHT_TIMEOUT).await
+        {
+            warn!(model = %entry.id, error = %e, "model preflight reported dead, skipping");
+            attempts.push((entry.id.clone(), e.to_string()));
+            continue;
+        }
         match complete(entry, &endpoint, prompt, handle.clone(), params).await {
             Ok(text) => {
                 let span = Span::current();
@@ -225,24 +246,6 @@ async fn call_openai(
     Ok(response)
 }
 
-/// Health-check the TRT-LLM proxy before building an agent. Shared by the
-/// buffered and streaming paths so the error wording cannot drift.
-async fn trtllm_preflight(endpoint: &str) -> Result<(), MvError> {
-    use mv_core::trtllm::health::HealthCheckResult;
-
-    match mv_core::trtllm::health::check_health(endpoint).await {
-        HealthCheckResult::Healthy => Ok(()),
-        HealthCheckResult::Unhealthy { status, body } => Err(MvError::BackendUnreachable {
-            endpoint: endpoint.to_string(),
-            hint: format!("Server returned {status}: {body}. {START_HINT}"),
-        }),
-        HealthCheckResult::Unreachable { error } => Err(MvError::BackendUnreachable {
-            endpoint: endpoint.to_string(),
-            hint: format!("TRT-LLM server not reachable ({error}). {START_HINT}"),
-        }),
-    }
-}
-
 /// Build the TRT-LLM agent (Chat Completions client, stop sequences,
 /// sampling params). Shared by the buffered and streaming paths.
 fn trtllm_agent(
@@ -291,7 +294,11 @@ async fn call_trtllm(
     handle: ToolServerHandle,
     params: &GenParams,
 ) -> Result<String, MvError> {
-    trtllm_preflight(endpoint).await?;
+    // Shared preflight: health + served-model check, the single source of the
+    // TRT-LLM reachability + not-loaded mapping (shared with the stream path).
+    if let PreflightStatus::Dead(e) = preflight(entry, endpoint, PREFLIGHT_TIMEOUT).await {
+        return Err(e);
+    }
 
     let model_name = entry.model_name();
     info!(model = %model_name, endpoint = %endpoint, locality = "local", "connecting to TRT-LLM");
@@ -333,22 +340,17 @@ pub async fn stream_trtllm(
     use rig::streaming::StreamedAssistantContent;
     use std::io::Write as _;
 
-    trtllm_preflight(endpoint).await?;
+    // One shared preflight covers both the health check and the served-model
+    // list. The latter matters most on the streaming path: rig's streaming
+    // layer swallows a proxy 502 (logs an SSE parse error, ends the turn
+    // empty), so without it an unloaded model would yield silent empty output
+    // and exit 0. A `Dead` status carries the `just load` / `trtllm-serve` hint.
+    if let PreflightStatus::Dead(e) = preflight(entry, endpoint, PREFLIGHT_TIMEOUT).await {
+        return Err(e);
+    }
 
     let model_name = entry.model_name();
     info!(model = %model_name, endpoint = %endpoint, locality = "local", "streaming from TRT-LLM");
-
-    // Preflight the served-model list. rig's streaming layer swallows a proxy
-    // 502 (logs an SSE parse error, ends the turn empty), so an unloaded model
-    // would otherwise yield silent empty output and exit 0. Only treat a
-    // definitive "not served" as an error; an indeterminate preflight (None)
-    // falls through to the stream attempt.
-    if mv_core::trtllm::health::served_model_present(endpoint, model_name).await == Some(false) {
-        return Err(MvError::ModelNotLoaded {
-            model: entry.id.clone(),
-            hint: format!("Run: just load {}", entry.id),
-        });
-    }
 
     let agent = trtllm_agent(entry, endpoint, handle, &GenParams::default())?;
 

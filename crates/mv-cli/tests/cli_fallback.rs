@@ -195,6 +195,48 @@ fn ineligible_error_does_not_fall_back() {
     );
 }
 
+// --- US2.1: a dead Ollama primary is skipped by preflight, backup serves ---
+
+#[test]
+fn dead_ollama_primary_preflight_skips_to_backup() {
+    // Ollama has no internal preflight in `complete`, so this exercises the
+    // walker's preflight-skip specifically: the dead primary is skipped before
+    // any agent build and the trtllm backup serves the request.
+    let proxy = FakeProxy::start();
+    proxy.mount_health_ok();
+    proxy.mount_chat_text("Backup served after preflight skip.");
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.yaml");
+    let yaml = format!(
+        "models:\n  \
+           - id: ollama-primary\n    provider: ollama\n    endpoint: {dead}\n    \
+             default: true\n    fallback: [{BACKUP_ID}]\n  \
+           - id: {BACKUP_ID}\n    provider: trtllm\n    served_name: {BACKUP_SERVED}\n    \
+             endpoint: {backup}\n",
+        dead = dead_endpoint(),
+        backup = proxy.endpoint(),
+    );
+    std::fs::write(&path, yaml).unwrap();
+
+    cmd()
+        .current_dir(dir.path())
+        .args([
+            "--config",
+            path.to_str().unwrap(),
+            "-m",
+            "ollama-primary",
+            "--no-tools",
+            "ping",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Backup served after preflight skip.",
+        ))
+        .stderr(predicate::str::contains(BACKUP_ID));
+}
+
 // --- FR-006: --stream keeps single-model semantics — no mid-stream fallback ---
 
 #[test]

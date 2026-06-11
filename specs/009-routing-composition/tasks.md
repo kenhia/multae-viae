@@ -55,17 +55,34 @@ never do; `just ci` green.
 
 ## Phase 2: WS2 — Preflight
 
-- [ ] T008 [WS2] `crates/mv-core/src/preflight.rs`:
-  `enum PreflightStatus { Healthy, Dead { reason }, Unknown }` +
-  `preflight(entry, timeout)` — trtllm = health + served-model presence
-  (delegating to `trtllm::health`), ollama = endpoint reachability, openai =
-  `Unknown`; injectable timeout; wiremock unit tests (mv-core dev-dep) (FR-005)
-- [ ] T009 [WS2] Chain walker skips `Dead` entries without a completion
+- [X] T008 [WS2] `crates/mv-core/src/preflight.rs`:
+  `enum PreflightStatus { Healthy, Dead, Unknown }` +
+  `preflight(entry, endpoint, timeout)` — trtllm = health + served-model
+  presence (delegating to `trtllm::health`), ollama = endpoint reachability,
+  openai = `Unknown`; injectable timeout (threaded into `check_health` /
+  `served_model_present`); wiremock unit tests (mv-core dev-dep) (FR-005).
+  *Deviation 1: `Dead(MvError)` carries the exact error the entry would surface
+  (not a bare `reason` string) — this lets both the walker (record verbatim)
+  and the trtllm call paths (return verbatim) share one probe without losing
+  the `just load` / `trtllm-serve` / "Is Ollama running?" hints. Deviation 2:
+  `preflight` takes an explicit `endpoint` so it probes the same resolved
+  endpoint the completion uses (honoring a `--endpoint` override), not
+  `entry.endpoint()`.*
+- [X] T009 [WS2] Chain walker skips `Dead` entries without a completion
   attempt, recording the skip as a span event; preserve provider hints (e.g.
-  `just load <id>`) in the final `AllModelsFailed`; tests (FR-005)
-- [ ] T010 [WS2] Re-point `call_trtllm`/`stream_trtllm` preflight at
+  `just load <id>`) in the final `AllModelsFailed`; tests (FR-005).
+  *Note: the skip is guarded on `chain_len > 1` so single-model chains go
+  straight to `complete` (their real classified error and pre-009 tests are
+  unchanged). The real win is a dead Ollama: `complete` has no internal
+  preflight there, so the skip avoids waiting out rig's connect timeout
+  (`dead_ollama_primary_preflight_skips_to_backup`).*
+- [X] T010 [WS2] Re-point `call_trtllm`/`stream_trtllm` preflight at
   `mv_core::preflight` — single source, `trtllm::health` becomes its
-  implementation detail; existing tests keep passing (FR-005)
+  implementation detail; existing tests keep passing (FR-005). *The streaming
+  path's two preflight steps (health, then served-model) collapse into one
+  `preflight` call. Both call paths still self-preflight (robust if `complete`
+  ever gets another caller); on a healthy trtllm backend in a chain this
+  overlaps the walker's probe by one cheap GET.*
 
 **Checkpoint**: dead locals skipped in milliseconds; one preflight seam.
 

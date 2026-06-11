@@ -4,6 +4,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 pub mod mcp;
+pub mod preflight;
 pub mod providers;
 pub mod tools;
 pub mod trtllm;
