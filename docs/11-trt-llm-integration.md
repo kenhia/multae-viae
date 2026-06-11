@@ -239,3 +239,60 @@ The integration effort is low (OpenAI-compatible API means near-zero protocol
 work), the benefit is high (access to optimized, quantized models with
 predictable performance), and the timing is right (before routing work in
 Phase 5 that would benefit from multiple provider backends).
+
+## Sprint 007: Streaming & Hardening
+
+Sprint 007 extends the TRT-LLM provider with token streaming, sharper
+error mapping, telemetry, and stop-sequence plumbing.
+
+### `--stream` flag
+
+The `prompt` subcommand accepts `--stream` to print model output to
+stdout as deltas arrive instead of buffering the full response. Streaming
+is only supported for `provider: trtllm` entries; passing `--stream` on
+any other provider exits with code 1 and the message
+`streaming is only supported for TRT-LLM models in this release`.
+
+Passing `--json --stream` together emits a warning to stderr and falls
+back to buffered JSON output (`--json` wins).
+
+```bash
+mv-cli -m llama-fp8 --stream "Explain Rust ownership"
+```
+
+### `Run: just load <id>` hint on 502
+
+When the TRT-LLM proxy reachable but returns HTTP 502 (typically because
+no model is loaded), the CLI maps the rig error to
+`MvError::ModelNotLoaded` whose Display includes
+`Run: just load <model-id>` as an actionable hint. The same classifier
+runs in buffered, streaming, and workflow paths.
+
+### Token-usage telemetry attributes
+
+Both the buffered and streaming TRT-LLM paths now record OTel
+`gen_ai.usage.input_tokens` and `gen_ai.usage.output_tokens` span
+attributes whenever the proxy supplies non-zero counts. The attributes
+are also visible in stderr fmt output at `-vv` (which enables
+`FmtSpan::CLOSE`).
+
+### Stop-sequence configuration
+
+Each `provider: trtllm` model entry may declare a `stop_sequences:` list.
+When omitted, multae-viae sends the provider-default set
+(`</s>`, `<|im_end|>`, `<|eot_id|>`) via `additional_params: {"stop":
+[...]}`. The helper lives in `mv_core::trtllm::stop` and is invoked by
+both the buffered and streaming agent builders.
+
+```yaml
+models:
+  - id: llama-fp8
+    provider: trtllm
+    served_name: llama-3_1-8b-fp8
+    architecture: llama
+    quant: fp8
+    expected_vram_gb: 9
+    stop_sequences:
+      - "<|eot_id|>"
+      - "<|end_of_text|>"
+```

@@ -174,3 +174,417 @@ models:
         .failure()
         .stderr(predicate::str::contains("TRT-LLM server not reachable"));
 }
+
+// --- T014 [US2]: live 502 maps to "Run: just load <id>" ---
+// Requires a running TRT-LLM proxy at http://localhost:8003 with NO model
+// loaded so that completion requests return HTTP 502.
+#[test]
+#[ignore = "requires TRT-LLM proxy"]
+fn trtllm_502_emits_just_load_hint() {
+    let yaml = r#"
+models:
+  - id: llama-fp8
+    provider: trtllm
+"#;
+    let config = write_models_yaml(yaml);
+    cmd()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "-m",
+            "llama-fp8",
+            "ping",
+        ])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("Run: just load llama-fp8"));
+}
+
+// --- T017 [US1]: --stream rejected for non-trtllm providers ---
+#[test]
+fn stream_flag_rejected_for_non_trtllm_provider() {
+    let yaml = r#"
+models:
+  - id: qwen3:4b
+    provider: ollama
+    endpoint: http://127.0.0.1:19999
+"#;
+    let config = write_models_yaml(yaml);
+    cmd()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "-m",
+            "qwen3:4b",
+            "--stream",
+            "hi",
+        ])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "streaming is only supported for TRT-LLM models in this release",
+        ));
+}
+
+// --- T018 [US1]: --stream flag visible in help ---
+#[test]
+fn stream_flag_known_to_clap() {
+    cmd()
+        .args(["prompt", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--stream"));
+}
+
+// --- T047 [US1]: --json overrides --stream with warning ---
+#[test]
+fn json_overrides_stream_with_warning() {
+    let yaml = r#"
+models:
+  - id: qwen3:4b
+    provider: ollama
+    endpoint: http://127.0.0.1:19999
+"#;
+    let config = write_models_yaml(yaml);
+    cmd()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "--json",
+            "-m",
+            "qwen3:4b",
+            "--stream",
+            "hi",
+        ])
+        .assert()
+        .stderr(predicate::str::contains(
+            "warning: --json overrides --stream; falling back to buffered JSON output",
+        ));
+}
+
+// --- T019 [US1]: live streaming emits incremental output ---
+#[test]
+#[ignore = "requires TRT-LLM proxy"]
+fn trtllm_stream_emits_incremental_output() {
+    let yaml = r#"
+models:
+  - id: llama-fp8
+    provider: trtllm
+"#;
+    let config = write_models_yaml(yaml);
+    let assert = cmd()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "-m",
+            "llama-fp8",
+            "--stream",
+            "Say hi and then stop.",
+        ])
+        .assert()
+        .success();
+    let output = assert.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.len() > 4,
+        "expected non-trivial stream output, got {stdout:?}"
+    );
+    assert!(
+        stdout.ends_with('\n'),
+        "expected single trailing newline, got {stdout:?}"
+    );
+    assert!(
+        !stdout.ends_with("\n\n"),
+        "expected exactly one trailing newline, got {stdout:?}"
+    );
+}
+
+// --- T020 [US1]: streaming path inherits US2 502 hint ---
+#[test]
+#[ignore = "requires TRT-LLM proxy"]
+fn trtllm_stream_inherits_just_load_hint_on_502() {
+    let yaml = r#"
+models:
+  - id: llama-fp8
+    provider: trtllm
+"#;
+    let config = write_models_yaml(yaml);
+    cmd()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "-m",
+            "llama-fp8",
+            "--stream",
+            "ping",
+        ])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("Run: just load llama-fp8"));
+}
+
+// --- T026 [US3]: buffered call records gen_ai.usage.{input,output}_tokens ---
+// Runs with -vv so the fmt subscriber emits span-close events (which include
+// the recorded span fields). Requires a live proxy with the model loaded.
+#[test]
+#[ignore = "requires TRT-LLM proxy"]
+fn trtllm_buffered_records_token_usage_attrs() {
+    let yaml = r#"
+models:
+  - id: llama-fp8
+    provider: trtllm
+"#;
+    let config = write_models_yaml(yaml);
+    let assert = cmd()
+        .args([
+            "-vv",
+            "--config",
+            config.path().to_str().unwrap(),
+            "-m",
+            "llama-fp8",
+            "Say hi and then stop.",
+        ])
+        .assert()
+        .success();
+    let output = assert.get_output();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("gen_ai.usage.input_tokens="),
+        "expected gen_ai.usage.input_tokens in stderr, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("gen_ai.usage.output_tokens="),
+        "expected gen_ai.usage.output_tokens in stderr, got:\n{stderr}"
+    );
+    // Both should be non-zero — the recorded values are present iff the
+    // proxy supplied usage, and our gate skipped recording when both are 0.
+    assert!(
+        !stderr.contains("gen_ai.usage.input_tokens=0 ")
+            && !stderr.contains("gen_ai.usage.input_tokens=0\n"),
+        "input_tokens should be non-zero, stderr:\n{stderr}"
+    );
+}
+
+// --- T031 [US4]: buffered tool-calling round-trip via TRT-LLM ---
+// Creates a temp directory with a uniquely-named marker file, asks the
+// model to list that directory using the built-in file_list tool, and
+// asserts the final answer mentions the marker file name. Requires a
+// live proxy with a tool-capable model loaded.
+#[test]
+#[ignore = "requires TRT-LLM proxy"]
+fn trtllm_buffered_tool_call_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = "mv_marker_abc123.txt";
+    std::fs::write(dir.path().join(marker), "hi").unwrap();
+    let yaml = r#"
+models:
+  - id: qwen3-trtllm
+    provider: trtllm
+    served_name: Qwen/Qwen3-8B
+    architecture: qwen
+"#;
+    let config = write_models_yaml(yaml);
+    let prompt = format!(
+        "Use the file_list tool to list the contents of {}, then tell me the file names you find.",
+        dir.path().display()
+    );
+    let assert = cmd()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "-m",
+            "qwen3-trtllm",
+            &prompt,
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        stdout.contains(marker),
+        "expected final answer to mention {marker}, got:\n{stdout}"
+    );
+}
+
+// --- T032 [US4]: streaming tool-calling round-trip via TRT-LLM ---
+#[test]
+#[ignore = "requires TRT-LLM proxy"]
+fn trtllm_streaming_tool_call_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = "mv_marker_xyz789.txt";
+    std::fs::write(dir.path().join(marker), "hi").unwrap();
+    let yaml = r#"
+models:
+  - id: qwen3-trtllm
+    provider: trtllm
+    served_name: Qwen/Qwen3-8B
+    architecture: qwen
+"#;
+    let config = write_models_yaml(yaml);
+    let prompt = format!(
+        "Use the file_list tool to list the contents of {}, then tell me the file names you find.",
+        dir.path().display()
+    );
+    let assert = cmd()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "-m",
+            "qwen3-trtllm",
+            "--stream",
+            &prompt,
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        stdout.contains(marker),
+        "expected streamed final answer to mention {marker}, got:\n{stdout}"
+    );
+}
+
+// --- T035 [US5]: every TRT-LLM model in models.yaml terminates cleanly ---
+// Loops every `provider: trtllm` entry in the repo-root models.yaml, sends
+// a fixed smoke prompt, and asserts the response does not contain literal
+// provider-default stop tokens. Requires the proxy with the model loaded.
+#[test]
+#[ignore = "requires TRT-LLM proxy"]
+fn trtllm_registry_models_terminate_cleanly() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let repo_root = std::path::Path::new(manifest_dir)
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root");
+    let registry_path = repo_root.join("models.yaml");
+    let registry = mv_core::ModelRegistry::load(&registry_path).expect("load models.yaml");
+    let trtllm_ids: Vec<String> = registry
+        .available_ids()
+        .into_iter()
+        .filter_map(|id| {
+            registry
+                .get(id)
+                .filter(|e| e.provider == "trtllm")
+                .map(|e| e.id.clone())
+        })
+        .collect();
+    assert!(
+        !trtllm_ids.is_empty(),
+        "expected at least one trtllm model in models.yaml"
+    );
+
+    let stop_tokens = ["</s>", "<|im_end|>", "<|eot_id|>"];
+    for id in &trtllm_ids {
+        let assert = cmd()
+            .args([
+                "--config",
+                registry_path.to_str().unwrap(),
+                "-m",
+                id,
+                "Say hi and then stop.",
+            ])
+            .assert()
+            .success();
+        let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+        for tok in &stop_tokens {
+            assert!(
+                !stdout.contains(tok),
+                "model {id} leaked stop token {tok} in stdout:\n{stdout}"
+            );
+        }
+    }
+}
+
+// --- T038 [US6]: 2-step workflow runs end-to-end via TRT-LLM ---
+// Writes a minimal 2-step prompt workflow whose second step references the
+// first step's output, runs `mv-cli workflow run` against it, and asserts
+// the process exits 0 (downstream step received the captured value).
+#[test]
+#[ignore = "requires TRT-LLM proxy"]
+fn workflow_with_trtllm_prompt_step_runs_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let workflow_path = dir.path().join("wf.yaml");
+    let workflow_yaml = r#"
+name: trtllm-smoke
+version: "1.0"
+defaults:
+  model: llama-fp8
+inputs: []
+steps:
+  - id: first
+    type: prompt
+    output: greeting
+    template: "Say 'hello' and stop."
+  - id: second
+    type: prompt
+    output: echoed
+    template: "Repeat this verbatim: {{greeting}}"
+outputs:
+  - name: final
+    from: second
+"#;
+    std::fs::write(&workflow_path, workflow_yaml).unwrap();
+
+    let models_yaml = r#"
+models:
+  - id: llama-fp8
+    provider: trtllm
+"#;
+    let config = write_models_yaml(models_yaml);
+
+    cmd()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "workflow",
+            "run",
+            workflow_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+}
+
+// --- T039 [US6]: workflow surfaces ModelNotLoaded hint on 502 ---
+#[test]
+#[ignore = "requires TRT-LLM proxy"]
+fn workflow_with_unloaded_trtllm_model_emits_just_load_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    let workflow_path = dir.path().join("wf.yaml");
+    let workflow_yaml = r#"
+name: trtllm-unloaded
+version: "1.0"
+defaults:
+  model: llama-fp8
+inputs: []
+steps:
+  - id: only
+    type: prompt
+    output: out
+    template: "ping"
+outputs:
+  - name: final
+    from: only
+"#;
+    std::fs::write(&workflow_path, workflow_yaml).unwrap();
+
+    let models_yaml = r#"
+models:
+  - id: llama-fp8
+    provider: trtllm
+"#;
+    let config = write_models_yaml(models_yaml);
+
+    cmd()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "workflow",
+            "run",
+            workflow_path.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("Run: just load llama-fp8"));
+}

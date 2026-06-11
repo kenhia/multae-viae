@@ -83,7 +83,12 @@ mv-cli "What is Rust?"                    # Direct prompt
 mv-cli prompt "What is Rust?"             # Explicit subcommand
 mv-cli -m qwen3:8b "Explain async"        # Specify model
 mv-cli --json "Hello"                     # JSON output
+mv-cli -m llama-fp8 --stream "Explain Rust ownership"   # Stream tokens (TRT-LLM only)
 ```
+
+> `--stream` is only supported for `provider: trtllm` models. Using
+> `--json --stream` together emits a warning and falls back to buffered
+> JSON output.
 
 #### Workflows
 
@@ -151,6 +156,12 @@ models:
   #   architecture: llama
   #   quant: fp8
   #   expected_vram_gb: 9
+  #   # Optional per-model stop sequences override. When omitted on a
+  #   # trtllm entry, multae-viae sends the provider-default set
+  #   # ("</s>", "<|im_end|>", "<|eot_id|>") via additional_params.
+  #   stop_sequences:
+  #     - "<|eot_id|>"
+  #     - "<|end_of_text|>"
   # Cloud provider (set OPENAI_API_KEY env var)
   # - id: gpt-4o-mini
   #   provider: openai

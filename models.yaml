@@ -25,3 +25,6 @@ models:
     architecture: llama
     quant: fp8
     expected_vram_gb: 9
+    stop_sequences:
+      - "<|eot_id|>"
+      - "<|end_of_text|>"

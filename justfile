@@ -28,3 +28,7 @@ ci:
     cargo fmt --all -- --check
     cargo clippy --all-targets --all-features -- -D warnings
     cargo test --workspace
+
+# Live TRT-LLM tests (require proxy on http://localhost:8003 with a model loaded)
+test-trtllm:
+    cargo test -p mv-cli -- --ignored
