@@ -381,7 +381,9 @@ Workflows are validated structurally after parsing
 - Transform `operation` is a known transform (`extract_json`)
 - Retry config: `max_attempts >= 1`
 - Workflow `outputs[].from` references an existing step (top-level or nested
-  in a branch/parallel)
+  in a branch/parallel) whose output is **definitely defined on every
+  execution path** — mapping from a step in a single branch arm, or from a
+  branch/parallel step itself (which has no single output), is an error
 - `branch`: the `condition` compiles as a minijinja expression and its
   variables resolve; the `then` arm is non-empty; **maybe-defined analysis** —
   an output is only available after the branch if every arm defines it
@@ -390,7 +392,10 @@ Workflows are validated structurally after parsing
   step has at least one child
 - Step ids and output names are checked across the whole tree (branch/parallel
   arms included); the same output name in a branch's `then` and `else` is the
-  recommended pattern, not a duplicate
+  recommended pattern, not a duplicate — but an arm step reusing an output
+  name from an enclosing scope is a duplicate (it would silently overwrite)
+- A `model: { prefer: [...] }` list (on a step or in `defaults`) must not be
+  empty
 
 **Not checked**: tool names. A `tool:` value is only resolved at runtime
 against the merged built-in + MCP tool set — a typo'd tool name passes

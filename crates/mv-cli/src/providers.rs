@@ -70,18 +70,39 @@ pub async fn complete_with_fallback(
     handle: ToolServerHandle,
     params: &GenParams,
 ) -> Result<CompletionOutcome, MvError> {
-    // Resolve the chain up front: the primary (with its possibly-overridden
-    // endpoint) then each fallback id. Fallback ids are registry-validated at
-    // load, so `get` is expected to hit; a missing entry is skipped defensively.
-    let mut chain: Vec<(&ModelEntry, String)> = vec![(primary, primary_endpoint.to_string())];
-    if let Some(ids) = &primary.fallback {
-        for id in ids {
-            if let Some(entry) = registry.get(id) {
-                chain.push((entry, entry.endpoint()));
+    let chain = build_chain(registry, &[(primary, primary_endpoint.to_string())]);
+    complete_chain(&chain, prompt, handle, params).await
+}
+
+/// Expand seed entries into the full candidate chain: each seed in order,
+/// followed by its own `fallback` entries, deduped by id across the whole
+/// chain. The single chain-construction rule shared by the CLI prompt path
+/// (one seed: the requested model, possibly with a `--endpoint` override) and
+/// workflow `prefer:` lists (one seed per preferred id). Seeds carry their
+/// endpoint; fallback entries use their own resolved endpoint. Fallback ids
+/// are registry-validated at load, so `get` is expected to hit; a missing
+/// entry is skipped defensively.
+pub fn build_chain<'a>(
+    registry: &'a ModelRegistry,
+    seeds: &[(&'a ModelEntry, String)],
+) -> Vec<(&'a ModelEntry, String)> {
+    let mut chain: Vec<(&ModelEntry, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (entry, endpoint) in seeds {
+        if seen.insert(entry.id.as_str()) {
+            chain.push((entry, endpoint.clone()));
+        }
+        if let Some(ids) = &entry.fallback {
+            for id in ids {
+                if let Some(fe) = registry.get(id)
+                    && seen.insert(fe.id.as_str())
+                {
+                    chain.push((fe, fe.endpoint()));
+                }
             }
         }
     }
-    complete_chain(&chain, prompt, handle, params).await
+    chain
 }
 
 /// Walk a pre-built candidate chain, returning the first success. The single

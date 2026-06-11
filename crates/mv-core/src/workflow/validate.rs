@@ -52,6 +52,17 @@ pub enum ValidationError {
     EmptyParallel {
         step_id: String,
     },
+    EmptyPreferList {
+        step_id: String,
+    },
+    OutputFromControlStep {
+        output_name: String,
+        step_id: String,
+    },
+    MaybeUndefinedOutput {
+        output_name: String,
+        step_id: String,
+    },
 }
 
 impl std::fmt::Display for ValidationError {
@@ -115,6 +126,29 @@ impl std::fmt::Display for ValidationError {
             Self::EmptyParallel { step_id } => {
                 write!(f, "parallel step '{step_id}' has no child steps")
             }
+            Self::EmptyPreferList { step_id } => {
+                write!(
+                    f,
+                    "step '{step_id}' has an empty model preference list — name at least one model"
+                )
+            }
+            Self::OutputFromControlStep {
+                output_name,
+                step_id,
+            } => write!(
+                f,
+                "output '{output_name}' maps from '{step_id}', a branch/parallel step with no \
+                 output of its own — map from one of its inner steps instead"
+            ),
+            Self::MaybeUndefinedOutput {
+                output_name,
+                step_id,
+            } => write!(
+                f,
+                "output '{output_name}' maps from step '{step_id}' whose output is not defined \
+                 on every execution path — define it in every branch arm, or map from a step \
+                 outside the branch"
+            ),
         }
     }
 }
@@ -147,10 +181,22 @@ pub fn validate(workflow: &Workflow, workflow_dir: Option<&Path>) -> Vec<Validat
         }
     }
 
+    // An empty `defaults.model` preference list would resolve every
+    // defaulted step to zero candidates.
+    if let Some(super::types::ModelSpec::Prefer { prefer }) =
+        workflow.defaults.as_ref().and_then(|d| d.model.as_ref())
+        && prefer.is_empty()
+    {
+        errors.push(ValidationError::EmptyPreferList {
+            step_id: "defaults".to_string(),
+        });
+    }
+
     // Per-step reference/template/output checks, recursing through branch arms
-    // with maybe-defined semantics (see `validate_steps`).
+    // with maybe-defined semantics (see `validate_steps`). The returned set is
+    // the output names *definitely* defined when the workflow finishes.
     let outer = HashSet::new();
-    validate_steps(
+    let defined = validate_steps(
         &workflow.steps,
         &outer,
         &input_names,
@@ -158,13 +204,30 @@ pub fn validate(workflow: &Workflow, workflow_dir: Option<&Path>) -> Vec<Validat
         &mut errors,
     );
 
-    // Check workflow outputs reference existing steps (top-level or nested).
+    // Workflow outputs must reference an existing step (top-level or nested)
+    // whose output is definitely defined on every execution path — otherwise
+    // the engine would silently omit the output (e.g. `from:` a step in a
+    // branch arm that did not run).
     for output in &workflow.outputs {
         if !seen_ids.contains(output.from.as_str()) {
             errors.push(ValidationError::MissingStepOutput {
                 output_name: output.name.clone(),
                 step_id: output.from.clone(),
             });
+        } else if let Some(step) = super::types::find_step(&workflow.steps, &output.from) {
+            match step.output() {
+                None => errors.push(ValidationError::OutputFromControlStep {
+                    output_name: output.name.clone(),
+                    step_id: output.from.clone(),
+                }),
+                Some(name) if !defined.contains(name) => {
+                    errors.push(ValidationError::MaybeUndefinedOutput {
+                        output_name: output.name.clone(),
+                        step_id: output.from.clone(),
+                    });
+                }
+                Some(_) => {}
+            }
         }
     }
 
@@ -241,6 +304,14 @@ fn validate_steps(
                             details: e.to_string(),
                         }),
                     }
+                }
+                // An empty preference list resolves to zero candidate models.
+                if let Some(super::types::ModelSpec::Prefer { prefer }) = &ps.model
+                    && prefer.is_empty()
+                {
+                    errors.push(ValidationError::EmptyPreferList {
+                        step_id: ps.id.clone(),
+                    });
                 }
                 register_output(
                     &ps.id,
@@ -373,9 +444,13 @@ fn validate_steps(
     defined_here
 }
 
-/// Register a leaf step's output: flag an in-scope duplicate (a later step
-/// would silently overwrite it), warn on input shadowing, and add it to the
-/// available/defined sets.
+/// Register a leaf step's output: flag a duplicate — in this scope, or
+/// shadowing an output from an enclosing scope (a branch/parallel arm step
+/// silently overwriting an earlier top-level output is the same accident the
+/// top-level duplicate check catches) — warn on input shadowing, and add it
+/// to the available/defined sets. The same name in two sibling branch arms is
+/// NOT a duplicate: the arms are mutually exclusive scopes, and defining an
+/// output in both is how it becomes definitely-defined after the branch.
 fn register_output(
     step_id: &str,
     output: &str,
@@ -384,7 +459,8 @@ fn register_output(
     defined_here: &mut HashSet<String>,
     errors: &mut Vec<ValidationError>,
 ) {
-    if !defined_here.insert(output.to_string()) {
+    let shadows_outer = available.contains(output) && !defined_here.contains(output);
+    if !defined_here.insert(output.to_string()) || shadows_outer {
         errors.push(ValidationError::DuplicateOutputName {
             output_name: output.to_string(),
             step_id: step_id.to_string(),
@@ -1327,6 +1403,205 @@ steps:
 "#;
         let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
         assert!(validate(&wf, None).is_empty(), "{:?}", validate(&wf, None));
+    }
+
+    // --- 009 review polish: outputs maybe-defined, empty prefer, arm shadowing ---
+
+    #[test]
+    fn output_from_step_in_one_arm_rejected() {
+        // `from:` a step inside a branch arm whose output is not defined in
+        // every arm → the output would silently vanish when the other arm runs.
+        let yaml = r#"
+name: test
+version: "1.0"
+inputs:
+  - name: flag
+    type: string
+steps:
+  - id: route
+    type: branch
+    condition: "flag == 'on'"
+    then:
+      - id: only_then
+        type: prompt
+        output: answer
+        template: "hi"
+outputs:
+  - name: result
+    from: only_then
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let errors = validate(&wf, None);
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::MaybeUndefinedOutput { output_name, step_id }
+                    if output_name == "result" && step_id == "only_then"
+            )),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn output_from_both_arm_step_accepted() {
+        // Both arms define `answer`, so mapping from either arm's step is safe.
+        let yaml = r#"
+name: test
+version: "1.0"
+inputs:
+  - name: flag
+    type: string
+steps:
+  - id: route
+    type: branch
+    condition: "flag == 'on'"
+    then:
+      - id: t
+        type: prompt
+        output: answer
+        template: "hi"
+    else:
+      - id: e
+        type: prompt
+        output: answer
+        template: "bye"
+outputs:
+  - name: result
+    from: t
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        assert!(validate(&wf, None).is_empty(), "{:?}", validate(&wf, None));
+    }
+
+    #[test]
+    fn output_from_parallel_child_accepted() {
+        // All parallel children run, so their outputs are always defined.
+        let yaml = r#"
+name: test
+version: "1.0"
+steps:
+  - id: fan
+    type: parallel
+    steps:
+      - id: a
+        type: prompt
+        output: out_a
+        template: "A"
+      - id: b
+        type: prompt
+        output: out_b
+        template: "B"
+outputs:
+  - name: result
+    from: a
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        assert!(validate(&wf, None).is_empty(), "{:?}", validate(&wf, None));
+    }
+
+    #[test]
+    fn output_from_control_step_rejected() {
+        // A branch step has no single output to map from.
+        let yaml = r#"
+name: test
+version: "1.0"
+inputs:
+  - name: flag
+    type: string
+steps:
+  - id: route
+    type: branch
+    condition: "flag == 'on'"
+    then:
+      - id: t
+        type: prompt
+        output: answer
+        template: "hi"
+    else:
+      - id: e
+        type: prompt
+        output: answer
+        template: "bye"
+outputs:
+  - name: result
+    from: route
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let errors = validate(&wf, None);
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::OutputFromControlStep { step_id, .. } if step_id == "route"
+            )),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn empty_prefer_list_rejected_on_step_and_defaults() {
+        let yaml = r#"
+name: test
+version: "1.0"
+defaults:
+  model:
+    prefer: []
+steps:
+  - id: s1
+    type: prompt
+    output: out
+    model:
+      prefer: []
+    template: "hi"
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let errors = validate(&wf, None);
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::EmptyPreferList { step_id } if step_id == "s1"
+            )),
+            "got: {errors:?}"
+        );
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::EmptyPreferList { step_id } if step_id == "defaults"
+            )),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn arm_step_shadowing_outer_output_rejected() {
+        // A branch arm step reusing a top-level output name would silently
+        // overwrite it at runtime — same accident as a top-level duplicate.
+        let yaml = r#"
+name: test
+version: "1.0"
+steps:
+  - id: setup
+    type: prompt
+    output: data
+    template: "base"
+  - id: route
+    type: branch
+    condition: "data"
+    then:
+      - id: clobber
+        type: prompt
+        output: data
+        template: "overwrites"
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let errors = validate(&wf, None);
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::DuplicateOutputName { output_name, step_id }
+                    if output_name == "data" && step_id == "clobber"
+            )),
+            "got: {errors:?}"
+        );
     }
 
     #[test]

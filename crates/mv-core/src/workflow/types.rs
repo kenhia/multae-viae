@@ -275,6 +275,33 @@ impl Workflow {
     }
 }
 
+/// Find a step by id, descending into branch arms and parallel children —
+/// shared by the engine (workflow `outputs` mapping) and the validator.
+pub fn find_step<'a>(steps: &'a [Step], id: &str) -> Option<&'a Step> {
+    for step in steps {
+        if step.id() == id {
+            return Some(step);
+        }
+        match step {
+            Step::Branch(bs) => {
+                if let Some(found) = find_step(&bs.then, id) {
+                    return Some(found);
+                }
+                if let Some(found) = find_step(&bs.otherwise, id) {
+                    return Some(found);
+                }
+            }
+            Step::Parallel(par) => {
+                if let Some(found) = find_step(&par.steps, id) {
+                    return Some(found);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn collect_model_references(steps: &[Step], refs: &mut Vec<(String, String)>) {
     for step in steps {
         match step {

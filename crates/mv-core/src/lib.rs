@@ -221,11 +221,13 @@ impl ModelRegistry {
             });
         }
 
-        // Fallback chains must reference real models and never point at
-        // themselves — an unknown or self-referencing id is a config mistake
-        // that would otherwise surface as a runtime surprise mid-prompt.
+        // Fallback chains must reference real models, never point at
+        // themselves, and never repeat an entry — each is a config mistake
+        // that would otherwise surface as a runtime surprise mid-prompt
+        // (a repeated id means attempting the same dead backend twice).
         for m in &config.models {
             let Some(chain) = &m.fallback else { continue };
+            let mut chain_seen = std::collections::HashSet::new();
             for target in chain {
                 if target == &m.id {
                     return Err(MvError::ConfigParseError {
@@ -238,6 +240,15 @@ impl ModelRegistry {
                         path: source.to_string(),
                         details: format!(
                             "model '{}' fallback references unknown model '{target}'",
+                            m.id
+                        ),
+                    });
+                }
+                if !chain_seen.insert(target.as_str()) {
+                    return Err(MvError::ConfigParseError {
+                        path: source.to_string(),
+                        details: format!(
+                            "model '{}' fallback lists '{target}' more than once",
                             m.id
                         ),
                     });
@@ -404,9 +415,14 @@ pub enum MvError {
     },
 }
 
-/// Render the per-attempt failure list for [`MvError::AllModelsFailed`] as one
-/// indented line per attempted model.
+/// Render a per-item failure list (`AllModelsFailed`, `WorkflowParallelFailed`)
+/// as one indented line per entry. An empty list (defensive — validation
+/// rejects empty chains/preference lists) renders a placeholder rather than
+/// a dangling colon.
 fn format_chain_attempts(attempts: &[(String, String)]) -> String {
+    if attempts.is_empty() {
+        return "  (no candidates were attempted)".to_string();
+    }
     attempts
         .iter()
         .map(|(model, reason)| format!("  - {model}: {reason}"))
@@ -814,6 +830,20 @@ models:
             msg.contains("primary") && msg.contains("ghost"),
             "got: {msg}"
         );
+    }
+
+    #[test]
+    fn fallback_duplicate_entry_rejected() {
+        let yaml = r#"
+models:
+  - id: primary
+    provider: trtllm
+    fallback: [backup, backup]
+  - id: backup
+    provider: ollama
+"#;
+        let err = ModelRegistry::from_yaml(yaml, "test").unwrap_err();
+        assert!(err.to_string().contains("more than once"), "got: {err}");
     }
 
     #[test]

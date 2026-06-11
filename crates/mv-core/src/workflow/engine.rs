@@ -227,8 +227,17 @@ async fn execute_steps<P: PromptExecutor, T: ToolExecutor>(
         )
         .await?;
 
+        // Leaf steps just recorded their output into ctx — surface its name
+        // and size; control steps (branch/parallel) log empty/0.
+        let output_name = step.output().unwrap_or("");
+        let output_len = step
+            .output()
+            .and_then(|name| ctx.output(name))
+            .map_or(0, str::len);
         info!(
             step_id = %step.id(),
+            output_name,
+            output_len,
             duration_ms = start.elapsed().as_millis() as u64,
             "step completed"
         );
@@ -366,9 +375,11 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
             let results = futures::future::join_all(child_futures).await;
 
             let mut failures: Vec<(String, String)> = Vec::new();
-            for (child, result) in par.steps.iter().zip(results.iter()) {
-                if let Err(e) = result {
-                    failures.push((child.id().to_string(), e.to_string()));
+            let mut completed: Vec<ExecutionContext> = Vec::new();
+            for (child, result) in par.steps.iter().zip(results) {
+                match result {
+                    Ok(child_ctx) => completed.push(child_ctx),
+                    Err(e) => failures.push((child.id().to_string(), e.to_string())),
                 }
             }
             if !failures.is_empty() {
@@ -381,7 +392,7 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
             // Merge each child's new outputs back into the parent context, in
             // declaration order (outputs are validated disjoint, so order only
             // affects determinism, not correctness).
-            for child_ctx in results.into_iter().map(Result::unwrap) {
+            for child_ctx in completed {
                 for (name, value) in child_ctx.outputs_added_since(&snapshot) {
                     ctx.insert_output(name, value);
                 }
@@ -433,33 +444,6 @@ fn step_type_name(step: &Step) -> &'static str {
     }
 }
 
-/// Find a step by id, descending into branch arms — workflow `outputs` may map
-/// `from:` to a step nested inside a branch.
-fn find_step_by_id<'a>(steps: &'a [Step], id: &str) -> Option<&'a Step> {
-    for step in steps {
-        if step.id() == id {
-            return Some(step);
-        }
-        match step {
-            Step::Branch(bs) => {
-                if let Some(found) = find_step_by_id(&bs.then, id) {
-                    return Some(found);
-                }
-                if let Some(found) = find_step_by_id(&bs.otherwise, id) {
-                    return Some(found);
-                }
-            }
-            Step::Parallel(par) => {
-                if let Some(found) = find_step_by_id(&par.steps, id) {
-                    return Some(found);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
 fn build_workflow_outputs(workflow: &Workflow, ctx: &ExecutionContext) -> HashMap<String, String> {
     if workflow.outputs.is_empty() {
         // When no outputs specified, return the last step's output (if it is a
@@ -477,7 +461,9 @@ fn build_workflow_outputs(workflow: &Workflow, ctx: &ExecutionContext) -> HashMa
             .iter()
             .filter_map(|wo| {
                 // wo.from is a step ID — find that step's output name.
-                let step = find_step_by_id(&workflow.steps, &wo.from)?;
+                // Validation guarantees the step exists and its output is
+                // definitely defined on every execution path.
+                let step = super::types::find_step(&workflow.steps, &wo.from)?;
                 let output_name = step.output()?;
                 ctx.output(output_name)
                     .map(|v| (wo.name.clone(), v.to_string()))

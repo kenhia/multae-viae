@@ -67,7 +67,7 @@ async fn preflight_trtllm(
             match served_model_present(endpoint, entry.model_name(), timeout).await {
                 Some(false) => PreflightStatus::Dead(MvError::ModelNotLoaded {
                     model: entry.id.clone(),
-                    hint: format!("Run: just load {}", entry.id),
+                    hint: crate::trtllm::load_hint(&entry.id),
                 }),
                 _ => PreflightStatus::Healthy,
             }
