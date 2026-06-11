@@ -60,7 +60,13 @@ mod tests {
 
     #[tokio::test]
     async fn get_unreachable_host() {
-        let result = http_get("http://192.0.2.1:1/test".to_string()).await;
+        // Bind to an ephemeral port, then drop the listener: connecting to
+        // the freed port is refused instantly, instead of waiting out the
+        // 30s request timeout against a blackhole address.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let result = http_get(format!("http://127.0.0.1:{port}/test")).await;
         assert!(result.is_err());
     }
 }

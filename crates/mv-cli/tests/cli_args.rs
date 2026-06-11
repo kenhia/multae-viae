@@ -1,43 +1,115 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
+use std::time::Duration;
 
 fn cmd() -> Command {
-    Command::cargo_bin("mv-cli").unwrap()
+    let mut c = Command::cargo_bin("mv-cli").unwrap();
+    c.timeout(Duration::from_secs(20));
+    c
+}
+
+/// Write a models.yaml in `dir` pinned to an instantly-refused endpoint:
+/// bind an ephemeral port, drop the listener, point the model at it.
+///
+/// Tests that only exercise flag plumbing still need a backend target; an
+/// explicit unreachable config makes them deterministic (no accidental live
+/// Ollama on :11434) and fast (connection refused, not a timeout).
+fn write_unreachable_config(dir: &std::path::Path) -> std::path::PathBuf {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let path = dir.join("models.yaml");
+    std::fs::write(
+        &path,
+        format!(
+            "models:\n  - id: test-model\n    provider: ollama\n    endpoint: http://127.0.0.1:{port}\n    default: true\n"
+        ),
+    )
+    .unwrap();
+    path
 }
 
 #[test]
 fn accepts_positional_prompt() {
-    // Should not fail on argument parsing (may fail on implementation with todo!())
-    let assert = cmd().arg("Hello world").assert();
-    // We only check it didn't fail due to clap arg parsing errors
-    // (exit code 2 = clap usage error)
-    assert.code(predicate::ne(2));
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_unreachable_config(dir.path());
+    cmd()
+        .current_dir(dir.path())
+        .args(["--config", config.to_str().unwrap(), "Hello world"])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("Cannot reach model backend"));
 }
 
 #[test]
 fn accepts_model_flag() {
-    let assert = cmd().args(["--model", "llama3", "Hello"]).assert();
-    assert.code(predicate::ne(2));
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_unreachable_config(dir.path());
+    cmd()
+        .current_dir(dir.path())
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "--model",
+            "test-model",
+            "Hello",
+        ])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("Cannot reach model backend"));
 }
 
 #[test]
 fn accepts_endpoint_flag() {
-    let assert = cmd()
-        .args(["--endpoint", "http://localhost:9999", "Hello"])
-        .assert();
-    assert.code(predicate::ne(2));
+    // The --endpoint flag overrides the registry endpoint; the error must
+    // mention the overridden endpoint, proving the flag took effect.
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_unreachable_config(dir.path());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    cmd()
+        .current_dir(dir.path())
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "--endpoint",
+            &format!("http://127.0.0.1:{port}"),
+            "Hello",
+        ])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains(format!("http://127.0.0.1:{port}")));
 }
 
 #[test]
 fn accepts_json_flag() {
-    let assert = cmd().args(["--json", "Hello"]).assert();
-    assert.code(predicate::ne(2));
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_unreachable_config(dir.path());
+    cmd()
+        .current_dir(dir.path())
+        .args(["--config", config.to_str().unwrap(), "--json", "Hello"])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains(r#"{"error""#))
+        .stdout(predicate::str::is_empty());
 }
 
 #[test]
 fn accepts_verbose_flag() {
-    let assert = cmd().args(["-vv", "Hello"]).assert();
-    assert.code(predicate::ne(2));
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_unreachable_config(dir.path());
+    cmd()
+        .current_dir(dir.path())
+        .args(["--config", config.to_str().unwrap(), "-vv", "Hello"])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("Cannot reach model backend"));
 }
 
 #[test]
@@ -49,16 +121,33 @@ fn missing_prompt_exits_with_usage_error() {
 
 #[test]
 fn accepts_config_flag() {
-    let assert = cmd().args(["--config", "models.yaml", "Hello"]).assert();
-    assert.code(predicate::ne(2));
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_unreachable_config(dir.path());
+    // The config was parsed (no parse error) and its endpoint was used
+    // (backend-unreachable, not a clap or config failure).
+    cmd()
+        .current_dir(dir.path())
+        .args(["--config", config.to_str().unwrap(), "Hello"])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("Cannot reach model backend"));
 }
 
 #[test]
 fn unknown_model_error_message() {
-    let assert = cmd()
-        .args(["--model", "nonexistent-model-xyz", "Hello"])
-        .assert();
-    assert
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_unreachable_config(dir.path());
+    cmd()
+        .current_dir(dir.path())
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "--model",
+            "nonexistent-model-xyz",
+            "Hello",
+        ])
+        .assert()
         .failure()
         .code(1)
         .stderr(predicate::str::contains("not found in registry"));
@@ -88,43 +177,56 @@ fn json_error_goes_to_stderr_not_stdout() {
 
 #[test]
 fn accepts_otlp_flag() {
-    let assert = cmd().args(["Hello", "--otlp"]).assert();
-    assert.code(predicate::ne(2));
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_unreachable_config(dir.path());
+    cmd()
+        .current_dir(dir.path())
+        .args(["--config", config.to_str().unwrap(), "Hello", "--otlp"])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("Cannot reach model backend"));
 }
 
 #[test]
 fn otlp_graceful_without_collector() {
-    // With --otlp pointing to a nonexistent collector, CLI should still
-    // attempt the prompt (and fail for backend reasons, not OTel reasons).
-    let assert = cmd()
-        .args(["--otlp", "http://localhost:59999", "Hello"])
-        .assert();
-    // Should NOT exit 2 (clap error); may exit 1 (backend unreachable) or 0
-    assert.code(predicate::ne(2));
+    // With --otlp pointing at a nonexistent collector, the CLI still
+    // attempts the prompt and fails for backend reasons, not OTel reasons.
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_unreachable_config(dir.path());
+    cmd()
+        .current_dir(dir.path())
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "--otlp",
+            "http://127.0.0.1:1",
+            "Hello",
+        ])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("Cannot reach model backend"));
 }
 
 // --- US3: API key missing test ---
 
 #[test]
 fn missing_api_key_error_message() {
-    // Create a temp config with an openai model and no API key set
-    let dir = std::env::temp_dir().join("mv-cli-test-apikey");
-    std::fs::create_dir_all(&dir).unwrap();
-    let config = dir.join("models.yaml");
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("models.yaml");
     std::fs::write(
         &config,
         "models:\n  - id: gpt-4o-mini\n    provider: openai\n    api_key_env: OPENAI_API_KEY\n    default: true\n",
     )
     .unwrap();
 
-    let assert = cmd()
+    cmd()
+        .current_dir(dir.path())
         .args(["--config", config.to_str().unwrap(), "Hello"])
         .env_remove("OPENAI_API_KEY")
-        .assert();
-    assert
+        .assert()
         .failure()
         .code(1)
         .stderr(predicate::str::contains("API key required"));
-
-    std::fs::remove_dir_all(&dir).ok();
 }

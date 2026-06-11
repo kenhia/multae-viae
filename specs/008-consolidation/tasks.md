@@ -37,9 +37,8 @@ missing. Live-backend tests stay `#[ignore]`d.
   `on_error: skip` masking from `workflows/examples/tool-example.yaml`; test (F2)
 - [X] T008 [WS1] Thread `temperature`/`max_tokens` from `RigPromptExecutor`
   through `call_ollama`/`call_openai`/`call_trtllm` via a `GenParams` struct
-  (F3). *Note: the wire-level assertion that the provider request carries the
-  params lands with the T025/T026 wiremock fixture — no hermetic observation
-  point exists before it.*
+  (F3). *Resolved: `workflow_prompt_step_propagates_temperature_and_max_tokens`
+  in `cli_fake_proxy.rs` asserts the request body on the wire (T026).*
 - [X] T009 [WS1] `RigPromptExecutor`: unknown model → `ModelNotInRegistry`
   (no silent default fallback); hermetic CLI test (F6)
 - [X] T010 [WS1] `--json` errors to stderr in `print_error`
@@ -110,20 +109,20 @@ missing. Live-backend tests stay `#[ignore]`d.
 
 ## Phase 4: WS4 — Test infrastructure
 
-- [ ] T025 [WS4] Add `wiremock` dev-dep to mv-cli; fixture module scripting
+- [X] T025 [WS4] Add `wiremock` dev-dep to mv-cli; fixture module scripting
   `/health`, `/v1/models`, `/v1/chat/completions` (200, 502+Triton body,
   tool_calls round-trip, SSE stream, malformed usage) (F25)
-- [ ] T026 [WS4] Hermetic happy-path tests: successful completion, multi-turn
+- [X] T026 [WS4] Hermetic happy-path tests: successful completion, multi-turn
   tool round-trip, streaming accumulation + trailing newline, 502→hint on both
   paths — against the fixture (F25)
-- [ ] T027 [P] [WS4] Fake stdio MCP server dev-binary (2 tools: one colliding,
+- [X] T027 [P] [WS4] Fake stdio MCP server dev-binary (2 tools: one colliding,
   one in `SEMANTIC_OVERLAPS`); tests for merge/precedence/skip/truncation/
   shutdown (F26)
-- [ ] T028 [P] [WS4] Hermetically pin all CLI tests (explicit `--config` to
+- [X] T028 [P] [WS4] Hermetically pin all CLI tests (explicit `--config` to
   unreachable endpoint or tempdir cwd); strengthen `code != 2`-only assertions;
   port-0-listener trick for unreachable tests; injectable HTTP/shell timeouts
   (suite ≤ 10s) (F27)
-- [ ] T029 [WS4] End-to-end workflow test through the CLI against the fixture
+- [X] T029 [WS4] End-to-end workflow test through the CLI against the fixture
   (prompt + tool + transform steps) (F28)
 
 **Checkpoint**: SC-002 and SC-004 met.
@@ -132,17 +131,17 @@ missing. Live-backend tests stay `#[ignore]`d.
 
 ## Phase 5: WS5 — Docs truth pass (polish)
 
-- [ ] T030 [P] [WS5] README: quickstart model (`qwen3:8b`), flag matrix table
+- [X] T030 [P] [WS5] README: quickstart model (`qwen3:8b`), flag matrix table
   (`--stream`×`--json`×`--no-tools`×provider), `--no-tools` in options, tool-step
   status, `just load` cross-repo note (F29, F34, G2/G3)
-- [ ] T031 [P] [WS5] docs/01 refresh through sprint 008: real crate tree, tech
+- [X] T031 [P] [WS5] docs/01 refresh through sprint 008: real crate tree, tech
   stack corrections, retitle "As of Sprint 003" (F30)
-- [ ] T032 [P] [WS5] docs/06: "(Phase 5/6 — not implemented)" tags on
+- [X] T032 [P] [WS5] docs/06: "(Phase 5/6 — not implemented)" tags on
   branch/parallel/loop/workflow/model-pref/`{{#if}}`/messages; fix top example;
   document the actual minijinja dialect (F31)
-- [ ] T033 [P] [WS5] docs/05 span names + OTLP-HTTP/4318; docs/04 npm package
+- [X] T033 [P] [WS5] docs/05 span names + OTLP-HTTP/4318; docs/04 npm package
   name; docs/00 index rows for 10/11; docs/10 phase number (F32)
-- [ ] T034 [P] [WS5] Spec hygiene: check 007 T042; refresh 007 quickstart
+- [X] T034 [P] [WS5] Spec hygiene: check 007 T042; refresh 007 quickstart
   streaming commands; create `specs/supplemental-spec.md` stub; models.yaml
   schema pointer (F33)
 - [ ] T035 [WS5] Update `docs/09-roadmap.md` Phase 4.6 checkboxes + lessons
