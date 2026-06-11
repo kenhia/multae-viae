@@ -144,7 +144,7 @@ missing. Live-backend tests stay `#[ignore]`d.
 - [X] T034 [P] [WS5] Spec hygiene: check 007 T042; refresh 007 quickstart
   streaming commands; create `specs/supplemental-spec.md` stub; models.yaml
   schema pointer (F33)
-- [ ] T035 [WS5] Update `docs/09-roadmap.md` Phase 4.6 checkboxes + lessons
+- [X] T035 [WS5] Update `docs/09-roadmap.md` Phase 4.6 checkboxes + lessons
   learned (after merge)
 
 **Checkpoint**: SC-005 met; sprint shippable.

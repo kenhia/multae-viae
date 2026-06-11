@@ -207,20 +207,20 @@ reference [docs/fable/02-findings.md](fable/02-findings.md). Sprint directory:
 `specs/008-consolidation/`.
 
 ### Tasks
-- [ ] Correctness (F1–F10): UTF-8 truncation panic, real workflow `ToolExecutor`,
+- [x] Correctness (F1–F10): UTF-8 truncation panic, real workflow `ToolExecutor`,
       wire `temperature`/`max_tokens`, retry-config panic, shell child-process leak,
       shell exit-status visibility, MCP output truncation, silent default-model
       substitution, max-turns classification, `--json` error channel
-- [ ] Phase-5 seam (F11–F14): extract `complete()` dispatch, typed error
+- [x] Phase-5 seam (F11–F14): extract `complete()` dispatch, typed error
       classification in `mv-core` + `is_fallback_eligible()`, `Provider` enum,
       `ModelRegistry` validation
-- [ ] Engine prep (F15–F18): extract `execute_step`/`execute_steps`, encapsulate
+- [x] Engine prep (F15–F18): extract `execute_step`/`execute_steps`, encapsulate
       `ExecutionContext`, `Send` bounds on executor traits, one template language,
       output-collision validation; decide the String→Value context migration
-- [ ] `ToolPolicy` seam, default-allow (F19)
-- [ ] Test infrastructure (F25–F28): wiremock fake-proxy fixture, fake stdio MCP
+- [x] `ToolPolicy` seam, default-allow (F19)
+- [x] Test infrastructure (F25–F28): wiremock fake-proxy fixture, fake stdio MCP
       server, hermetic CLI tests, end-to-end workflow test
-- [ ] Docs truth pass (F29–F34): README quickstart, docs/01 refresh, docs/06
+- [x] Docs truth pass (F29–F34): README quickstart, docs/01 refresh, docs/06
       not-implemented tags, spec hygiene
 
 ### Deliverable
@@ -228,6 +228,22 @@ reference [docs/fable/02-findings.md](fable/02-findings.md). Sprint directory:
 - `just ci` exercises a successful model call and a full workflow hermetically
 - Phase 5 fallback/routing has a single dispatch seam and machine-readable
   failure classes to build on
+
+### Lessons Learned
+- A green gate only certifies what it exercises: workflow tool steps and
+  sampling params shipped non-functional behind 189 passing tests because no
+  hermetic test ever ran a successful completion or a full workflow. The
+  wiremock fake-proxy fixture closed that class of gap (and cut the suite
+  from ~35s to ~1.3s).
+- rig's typestate `AgentBuilder<M, P, ToolState>` unifies across providers
+  with plain generic helpers — no `dyn` provider abstraction was needed for
+  a single dispatch seam; fallback chains operate at the `Result` level.
+- Validation and rendering must share one template engine: the naive
+  `{{…}}` scanner rejected valid minijinja (filters) and missed `{% if %}`
+  references. `Template::undeclared_variables()` is the single source.
+- `Send` bounds on async traits are cheap with two implementors and breaking
+  with ten — typestate/trait shape changes belong in consolidation windows,
+  not feature sprints.
 
 ---
 
