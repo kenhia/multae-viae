@@ -96,15 +96,17 @@ answered with data.
 
 ## Phase 5: WS5 — Docs truth pass (polish)
 
-- [ ] T010 [WS5] Rewrite docs/08-rag-integration.md to the shipped
-  architecture: klams as the memory/RAG service, MCP boundary diagram, tool
-  surface pointer to the contract doc, degraded-mode behavior; drop the
-  krag/qdrant/ollama build plan (FR-008)
-- [ ] T011 [P] [WS5] docs/04-mcp-integration.md: `auth_token_env`
-  configuration + secrecy convention; README: klams server example in
-  `mcp-servers.yaml`, RAG example workflow mention (FR-008)
-- [ ] T012 [P] [WS5] docs/01-architecture-design.md refresh through sprint
-  010 (MCP auth seam, klams integration); roadmap Phase 5.5 checkboxes +
-  lessons learned at merge (FR-008)
+- [X] T010 [WS5] Rewrote docs/08-rag-integration.md to the shipped klams
+  architecture: MCP boundary diagram, read-only scope, tool-surface pointer,
+  two retrieval styles, the tool-output-cap guidance, degraded mode, klams-side
+  ingestion, accepted limitations; krag/qdrant/ollama build plan dropped
+  (historical note retained) (FR-008)
+- [X] T011 [P] [WS5] docs/04-mcp-integration.md: Configuration &
+  Authentication section (`auth_token_env`, secrecy, HTTP-only); README:
+  klams bearer-auth example in `mcp-servers.yaml` + RAG example link (FR-008)
+- [X] T012 [P] [WS5] docs/01-architecture-design.md: MCP-client auth note,
+  RAG-client section flipped to shipped, sprint-010 entry in the
+  implementation history; roadmap Phase 5.5 checkboxes ticked + Lessons
+  Learned added (FR-008)
 
 **Checkpoint**: SC-001–SC-006 met; sprint shippable.

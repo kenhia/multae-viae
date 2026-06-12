@@ -275,14 +275,24 @@ servers:
     env:
       NODE_ENV: production
 
-  # Remote HTTP server
-  - name: remote-rag
+  # Remote HTTP server with bearer auth (e.g. the klams memory service)
+  - name: klams
     transport: http
-    url: http://192.168.1.100:8080/mcp
+    url: http://kubs0:7777/mcp
+    auth_token_env: KLAMS_TOKEN   # env var holding the bearer token (HTTP only)
 ```
 
 MCP tools merge with built-in tools into a single unified set. The model chooses
 the best tool for each task — built-in or MCP — transparently.
+
+**Bearer auth (`auth_token_env`):** for an HTTP server that requires a token,
+name the environment variable holding it. The CLI reads the value at connect
+time and sends `Authorization: Bearer <token>` on every request — the secret
+stays out of config, logs, and traces. A missing variable is an actionable,
+non-fatal error (the server is skipped). The field is rejected on `stdio`
+servers. This is how the CLI consumes **klams** for retrieval-augmented
+context — see [RAG integration](docs/08-rag-integration.md) and the
+[`rag-example.yaml`](workflows/examples/rag-example.yaml) workflow.
 
 ```bash
 # Use with default config file (mcp-servers.yaml)

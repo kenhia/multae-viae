@@ -325,16 +325,40 @@ klams's facts/events/knowledge model is also the planned Phase 6
 persistent-memory backend, so this boundary serves both phases.
 
 ### Tasks
-- [ ] Bearer-token auth for HTTP MCP servers (`auth_token_env`)
-- [ ] Agentic retrieval: klams `memory_search` in the merged toolset, proven
+- [x] Bearer-token auth for HTTP MCP servers (`auth_token_env`)
+- [x] Agentic retrieval: klams `memory_search` in the merged toolset, proven
       hermetically (fake klams server)
-- [ ] Workflow retrieval: shipped RAG example (tool step → prompt step)
-- [ ] Tool-output cap evaluated against realistic retrieval payloads
-- [ ] Graceful degradation when klams is unreachable; live `#[ignore]`d
+- [x] Workflow retrieval: shipped RAG example (tool step → prompt step)
+- [x] Tool-output cap evaluated against realistic retrieval payloads
+- [x] Graceful degradation when klams is unreachable; live `#[ignore]`d
       kubs0 tests (`just test-klams`)
 
 ### Deliverable
 - Agent retrieves relevant context from klams for knowledge-intensive tasks
+
+### Lessons Learned
+- The biggest win was *not building*: assessing klams (already deployed, 77
+  tests, MCP + auth + retrieval + ingestion) against the krag handoff turned a
+  multi-sprint "build a RAG service" into a ~4-workstream "consume one over
+  MCP." The reusable move was writing the integration contract
+  (`contracts/klams-tool-surface.md`) *first*, pinned to a real commit — it
+  made the dependency explicit and the eventual backend swap cheap.
+- The one genuinely new mechanism, bearer auth, was small because the rmcp
+  client takes a caller-supplied `reqwest::Client`: a default `Authorization`
+  header (marked `set_sensitive`) was the whole change, no transport fork.
+  Following the existing `api_key_env` env-indirection convention meant no new
+  config philosophy to invent.
+- The flagged risk (rmcp client↔server Streamable-HTTP compatibility, with m-v
+  on rmcp 1.5 and klams on 1.7) was retired *hermetically* by reading the
+  client source: it accepts plain `application/json` (no SSE), needs an
+  `Mcp-Session-Id` on initialize (not stateless by default), and tolerates a
+  `405` on the background GET. A wiremock fake with a custom id-echoing
+  responder then exercises the real protocol path — no live service required
+  for the default suite.
+- Measuring the tool-output cap beat guessing about it: top_k 5 ≈ 6.5k vs the
+  10k cap, top_k 10 ≈ 13k. A one-line size test pinned the boundary and made
+  "keep the universal cap, cap the example at top_k 5" a recorded decision
+  rather than a latent truncation bug.
 
 ---
 

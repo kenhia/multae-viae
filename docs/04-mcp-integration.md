@@ -161,13 +161,50 @@ enum McpTransport {
 }
 ```
 
-### Phase 2: RAG as MCP Server
+### Configuration & authentication
 
-The RAG service on the local network exposes itself as an MCP server:
+MCP servers are declared in `mcp-servers.yaml` (resolved from `--mcp-config`,
+else `./mcp-servers.yaml`). Each entry is `stdio` (a spawned command) or `http`
+(a Streamable HTTP URL):
 
-- **Tools**: `search_documents`, `ingest_document`, `list_collections`
-- **Resources**: Retrieved document chunks
-- **Transport**: Streamable HTTP (since it's on a different machine)
+```yaml
+servers:
+  - name: filesystem
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+  - name: klams
+    transport: http
+    url: http://kubs0:7777/mcp
+    auth_token_env: KLAMS_TOKEN     # HTTP only — see Authentication
+```
+
+#### Authentication
+
+HTTP servers may require a bearer token. The `auth_token_env` field names an
+**environment variable** holding the token; m-v reads it at connect time and
+sends `Authorization: Bearer <token>` on every request to that server.
+
+- The **secret is never in config** — only the variable's *name* is. The token
+  value is also kept out of logs, traces, and error messages (the header is
+  marked sensitive, mirroring the `api_key_env` convention used by
+  `models.yaml`).
+- A **missing or empty** variable is an actionable error naming the variable
+  and the server; like any MCP connection failure it is logged and skipped
+  (non-fatal) rather than aborting the run.
+- `auth_token_env` is **HTTP-only** — config validation rejects it on `stdio`
+  servers (whose secrets flow through the existing `env:` map). stdio servers
+  have no bearer concept.
+
+This is what lets m-v consume the authenticated **klams** memory service; see
+[RAG integration](08-rag-integration.md).
+
+### RAG as MCP Server — shipped (klams)
+
+Retrieval is served by **klams** over authenticated Streamable HTTP, not a
+service built here. m-v calls `memory_search` (read-only this sprint) and the
+tool merges into the agent tool set. Full detail and the pinned tool contract
+live in [RAG integration](08-rag-integration.md).
 
 ### Phase 3: Controller as MCP Server
 

@@ -1,246 +1,150 @@
 # RAG Integration
 
+**Status (sprint 010, Phase 5.5):** retrieval-augmented context is provided by
+**klams** (Ken's Local Agent Memory System), a separate Rust service deployed
+on `kubs0`, consumed by multae-viae over MCP. This document describes the
+shipped integration.
+
+> Historical note: earlier drafts of this document sketched a build-it-here RAG
+> service (a Qdrant store, an Ollama embedding pipeline, and a bespoke RAG MCP
+> server). That plan was set aside — klams already provides all of it,
+> deployed. A krag-backed alternative was also evaluated and declined (handoff
+> in the krag repo, superseded). See `specs/010-klams-rag/` for the decision
+> record.
+
 ## Architecture
 
-RAG (Retrieval-Augmented Generation) provides the controller with long-term
-memory and domain-specific knowledge. The RAG service runs on a separate machine
-on the local network, exposed as an MCP server.
+klams owns the entire retrieval stack — vector store (Qdrant), embeddings
+(Hugging Face TEI), chunking, ingestion (a filesystem scanner), and hybrid
+search — behind an MCP server. multae-viae is a **client**: it sends text
+queries and receives ranked results. It never embeds, chunks, or stores
+anything itself. Because the boundary is MCP over the network, klams's
+implementation language and internals are irrelevant to m-v, and the backend
+could be swapped without m-v changes as long as the tool surface holds.
 
 ```
-┌─────────────────────────────┐          ┌──────────────────────────┐
-│     Multae Viae Controller  │          │    RAG Service           │
-│     (this machine)          │          │    (network machine)     │
-│                             │          │                          │
-│  ┌────────────────────┐     │   HTTP   │  ┌────────────────────┐  │
-│  │    MCP Client      │◄────┼──────────┼──│   MCP Server       │  │
-│  │  (rmcp, HTTP)      │     │          │  │   (rmcp)           │  │
-│  └────────────────────┘     │          │  └────────────────────┘  │
-│                             │          │           │              │
-│  ┌────────────────────┐     │          │  ┌────────▼───────────┐  │
-│  │  Embedding Model   │     │          │  │  Vector Store      │  │
-│  │  (local, Ollama)   │     │          │  │  (Qdrant/LanceDB)  │  │
-│  └────────────────────┘     │          │  └────────────────────┘  │
-│                             │          │                          │
-│  ┌────────────────────┐     │          │  ┌────────────────────┐  │
-│  │  Document Loader   │     │          │  │  Embedding Model   │  │
-│  │  (ingestion)       │     │          │  │  (local or shared) │  │
-│  └────────────────────┘     │          │  └────────────────────┘  │
-└─────────────────────────────┘          └──────────────────────────┘
+┌─────────────────────────────┐          ┌──────────────────────────────┐
+│   multae-viae (dev box)     │          │   klams (kubs0)              │
+│                             │          │                              │
+│  ┌────────────────────┐     │   MCP    │  ┌────────────────────────┐  │
+│  │  rmcp MCP client   │◄────┼──Streamable─│  rmcp MCP server :7777 │  │
+│  │  (mcp-servers.yaml)│     │  HTTP +  │  │  /mcp  (bearer auth)   │  │
+│  └─────────┬──────────┘     │  bearer  │  └───────────┬────────────┘  │
+│            │ merge          │          │      ┌───────┴────────┐      │
+│  ┌─────────▼──────────┐     │          │  Qdrant │ TEI embed │ PG    │
+│  │  agent tool set    │     │          │  (vectors) (HF)  (facts) │   │
+│  │  (built-ins + MCP) │     │          │      klams-scanner indexes │  │
+│  └────────────────────┘     │          │      ~/src, ~/obsidian …   │  │
+└─────────────────────────────┘          └──────────────────────────────┘
 ```
 
-## RAG as MCP Server
+## What m-v consumes
 
-The RAG service exposes its capabilities via MCP primitives:
+The klams tool surface m-v depends on is pinned in
+[`specs/010-klams-rag/contracts/klams-tool-surface.md`](../specs/010-klams-rag/contracts/klams-tool-surface.md)
+— that contract is the source of truth; additive klams changes are safe,
+breaking ones require coordination.
 
-### Tools
+**Sprint 010 is read-only.** m-v calls `memory_search` (and could call
+`memory_related` / `event_search`) under a **`Read`-scoped** token. Memory
+*writes* (`register_author`, `memory_add`, `memory_append_event`) are deferred
+to Phase 6 (persistent memory), where author lifecycle deserves its own design.
+
+`memory_search` takes `{ query, top_k?, kinds?, tags? }` and returns ranked
+`PublicMemory` items. Knowledge items carry `text`, `source_path`, `tags`, and
+provenance; the ranked **order is authoritative** — klams fuses vector and
+full-text results (RRF), so the numeric score is not a cross-result-comparable
+similarity. m-v consumes the `text`.
+
+## Configuring klams as an MCP server
+
+klams requires a bearer token. m-v reads it from an environment variable named
+by `auth_token_env` (the token value never appears in config, logs, or
+traces — see [MCP integration](04-mcp-integration.md#authentication)):
 
 ```yaml
-# Tools exposed by the RAG MCP server
-tools:
-  - name: search_documents
-    description: Search the knowledge base for relevant documents
-    parameters:
-      query: string            # Natural language search query
-      collection: string       # Which collection to search
-      limit: integer           # Max results (default: 5)
-      min_score: float         # Minimum similarity score (0-1)
-    
-  - name: ingest_document
-    description: Add a document to the knowledge base
-    parameters:
-      content: string          # Document text
-      metadata: object         # Title, source, tags, etc.
-      collection: string       # Target collection
-
-  - name: list_collections
-    description: List available document collections
-    
-  - name: delete_document
-    description: Remove a document by ID
-    parameters:
-      id: string
-      collection: string
+# mcp-servers.yaml
+servers:
+  - name: klams
+    transport: http
+    url: http://kubs0:7777/mcp
+    auth_token_env: KLAMS_TOKEN     # the env var holding the bearer token
 ```
 
-### Resources
+```bash
+set -x KLAMS_TOKEN <read-scoped-token>   # fish; or export in bash
+```
+
+Once configured, `memory_search` merges into the agent's tool set like any MCP
+tool (built-in tools still win on a name collision).
+
+## Two retrieval styles
+
+**Agentic** — the model decides to search. With klams configured, the agent
+calls `memory_search` during its multi-turn loop when a prompt needs
+background knowledge, then answers from what came back. Nothing else is
+required; it is just another tool the model can reach.
+
+**Workflow (deterministic)** — a `tool` step retrieves and a later prompt step
+consumes the result, so retrieval does not depend on the model choosing to
+search. See [`workflows/examples/rag-example.yaml`](../workflows/examples/rag-example.yaml):
 
 ```yaml
-# Resources exposed by the RAG MCP server
-resources:
-  - uri: "rag://collections"
-    description: List of available collections and their stats
-  - uri: "rag://collections/{name}/stats"
-    description: Statistics for a specific collection
+steps:
+  - id: retrieve
+    type: tool
+    tool: memory_search
+    inputs:
+      query: "{{question}}"
+      top_k: 5                 # keep small — see "Result size" below
+    output: context
+  - id: answer
+    type: prompt
+    template: |
+      Answer using only this context:
+      {{context}}
+      Question: {{question}}
+    output: answer
 ```
 
-## Vector Store Options
+### Result size and the tool-output cap
 
-### Qdrant — ⭐ Recommended
+Tool output is capped at 10,000 characters (the universal MCP-tool guard). A
+`memory_search` result is a JSON array of chunks; at klams's ~800-char chunk
+size, **top_k 3–5 stays comfortably under the cap** (~4–6.5k), while top_k ≈ 8+
+can exceed it and truncate the context silently. Keep `top_k` in the 3–5 range
+for prompt-bound retrieval. The cap is deliberately a single universal value,
+not per-server (measured in `cli_klams.rs`; see
+`specs/010-klams-rag/plan.md` §6).
 
-**Why**: Purpose-built vector database, excellent performance, REST + gRPC API,
-Rig integration (`rig-qdrant`), easy Docker deployment.
+## Degraded mode
 
-```bash
-# Run Qdrant
-docker run -p 6333:6333 -p 6334:6334 \
-  -v $(pwd)/qdrant_data:/qdrant/storage \
-  qdrant/qdrant
-```
+If klams is unreachable, the MCP connection failure is **logged and skipped** —
+non-RAG work proceeds normally (this is the standard MCP behavior: a failed
+server never aborts the run). A workflow that *requires* `memory_search` fails
+loudly with the usual unknown-tool error, naming the missing tool. A
+missing/empty `auth_token_env` variable is an actionable, non-fatal error
+naming the variable and server.
 
-```rust
-// Rig + Qdrant integration
-use rig_qdrant::QdrantVectorStore;
+## Ingestion (klams-side)
 
-let qdrant = QdrantVectorStore::new("http://rag-machine:6333", "knowledge_base");
-let agent = client.agent("qwen3:8b")
-    .preamble("You are a helpful assistant.")
-    .dynamic_context(2, qdrant.index())  // RAG with top-2 results
-    .build();
-```
+m-v does not ingest. klams keeps its corpus fresh with `klams-scanner` (an
+hourly systemd timer) walking configured roots (`~/src`, `~/obsidian`, …),
+chunking on Markdown headings (~800 chars, content-hashed for dedupe), and
+pruning vanished files. Adding content to klams's knowledge base is a klams
+operation, out of m-v's scope this sprint.
 
-### LanceDB — Alternative
+## Known limitations (accepted for now)
 
-**Why**: Embedded vector database (no separate server), good for simpler
-setups, Rig integration (`rig-lancedb`).
+Behind the contract, klams today uses a single knowledge collection, a 384-dim
+general-purpose embedding model, and heading-based (not code-aware) chunking —
+so code retrieval is weaker than prose retrieval. These are improvable inside
+klams without m-v changes. Adaptive/code-aware retrieval is not on m-v's
+roadmap; it would be a klams enhancement.
 
-```rust
-use rig_lancedb::LanceDbVectorStore;
+## Live verification
 
-let db = lancedb::connect("data/lancedb").await?;
-let store = LanceDbVectorStore::new(db, "documents");
-```
-
-### SQLite with Vector Extension
-
-**Why**: Simplest possible option, Rig integration (`rig-sqlite`), no
-additional infrastructure.
-
-## Embedding Models
-
-### Local Embeddings (Recommended)
-
-Run embedding models locally via Ollama:
-
-```bash
-ollama pull nomic-embed-text     # 137M params, good quality
-ollama pull mxbai-embed-large    # 335M params, higher quality
-```
-
-```rust
-// Generate embeddings via Ollama
-let embeddings = client.embeddings("nomic-embed-text")
-    .embed("text to embed")
-    .await?;
-```
-
-### Via Candle (Custom)
-
-For custom embedding models or when you need more control:
-
-```rust
-use candle_core::{Device, Tensor};
-use candle_transformers::models::bert;
-
-// Load and run a BERT model for embeddings
-let model = bert::BertModel::load(weights, &config, device)?;
-let embeddings = model.forward(&input_ids, &token_type_ids)?;
-```
-
-## RAG Pipeline
-
-### Ingestion Pipeline
-
-```
-Document Source
-    │
-    ▼
-┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
-│  Load    │────▶│  Chunk   │────▶│  Embed   │────▶│  Store   │
-│  (parse) │     │  (split) │     │  (model) │     │  (vector │
-│          │     │          │     │          │     │   DB)    │
-└──────────┘     └──────────┘     └──────────┘     └──────────┘
-```
-
-**Loading**: Extract text from various formats:
-- PDF, DOCX, TXT, MD, HTML
-- Code files (with language-aware chunking)
-- Web pages (via scraping)
-
-**Chunking strategies**:
-- Fixed size with overlap (simple, works for most text)
-- Semantic chunking (split on topic changes)
-- Code-aware chunking (split on function/class boundaries)
-- Recursive splitting (split large chunks further)
-
-**Kalosm utilities**: The Kalosm crate provides built-in document extraction
-and chunking utilities that could be useful here:
-```rust
-use kalosm::language::*;
-
-// Extract context from various formats
-let document = Document::from_path("research.pdf")?;
-let chunks = document.chunked(ChunkStrategy::Sentence { overlap: 2 });
-```
-
-### Retrieval Pipeline
-
-```
-User Query
-    │
-    ▼
-┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
-│  Embed   │────▶│  Search  │────▶│  Rerank  │────▶│  Format  │
-│  Query   │     │  Vector  │     │(optional)│     │  Context │
-│          │     │   DB     │     │          │     │          │
-└──────────┘     └──────────┘     └──────────┘     └──────────┘
-                                                        │
-                                                        ▼
-                                                   ┌───────────┐
-                                                   │  LLM      │
-                                                   │  Prompt   │
-                                                   │  + Context│
-                                                   └───────────┘
-```
-
-### Rig's RAG Integration
-
-Rig makes RAG straightforward with its `dynamic_context` builder:
-
-```rust
-let index = qdrant_store.index(embedding_model);
-
-let agent = client.agent("qwen3:8b")
-    .preamble("You are a helpful assistant. Use the provided context to answer.")
-    .dynamic_context(3, index)  // Retrieve top-3 chunks per query
-    .build();
-
-// Queries automatically retrieve relevant context
-let response = agent.prompt("What were the key findings?").await?;
-```
-
-## Data to Index
-
-For an "always-on second brain" agent, consider indexing:
-
-| Source | Type | Update Frequency |
-|--------|------|-----------------|
-| Personal notes | Markdown files | On file change (watch) |
-| Code repositories | Code + docs | On commit |
-| Bookmarks/articles | Web content | On add |
-| Meeting notes | Text/audio transcription | After each meeting |
-| Terminal history | Command history | Periodic |
-| Email summaries | Text | Periodic |
-| Calendar events | Structured data | Periodic |
-| Project documentation | Various formats | On change |
-
-## Network Considerations
-
-Since the RAG service is on a different machine on the local network:
-
-1. **Transport**: Use MCP over Streamable HTTP (not stdio)
-2. **Latency**: Expect 1-10ms network latency (LAN)
-3. **Authentication**: Use API keys or mTLS for the MCP connection
-4. **Availability**: Handle RAG service being temporarily unavailable
-   (graceful degradation — answer without context)
-5. **Bandwidth**: Embedding vectors are small (~1.5KB for 384-dim float32),
-   document chunks are typically 500-2000 tokens (~2-8KB)
+`just test-klams` runs `#[ignore]`d round-trips against the real klams on
+kubs0 (gated on `KLAMS_TOKEN`; `KLAMS_URL` overrides the endpoint). The
+hermetic suite (`just ci`) proves the integration against a fake klams MCP
+server and never touches the network.
