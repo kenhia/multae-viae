@@ -383,19 +383,46 @@ server — the CLI gains continuity first, and `mv-server` later imports the
 same seam. Writes go through the same authenticated MCP boundary as Phase 5.5
 (contract v1.1 adds the write tools).
 
-- [ ] Contract v1.1: `register_author`, `memory_add`, `memory_append_event`,
+- [x] Contract v1.1: `register_author`, `memory_add`, `memory_append_event`,
       `event_search` become load-bearing; Write-scoped token
-- [ ] `MemoryStore` trait in mv-core, klams-backed impl in the binary
+- [x] `MemoryStore` trait in mv-core, klams-backed impl in the binary
       (the `PromptExecutor` pattern, per the fable Phase 6 pre-work)
-- [ ] Session continuity: `--session <name>` — register author, recall before
+- [x] Session continuity: `--session <name>` — register author, recall before
       the prompt, record the turn after; two runs, second remembers the first
-- [ ] Agent-writable memory: klams write tools in the merged toolset with
+- [x] Agent-writable memory: klams write tools in the merged toolset with
       per-run author attribution
-- [ ] Degradation (memory never blocks a prompt) + stateful fake klams +
-      live kubs0 round-trip with cleanup
+- [x] Degradation (memory never blocks a prompt) + stateful fake klams +
+      live kubs0 round-trip
 
 **Deliverable**: m-v remembers across invocations — conversations recallable,
 preferences learnable — with every write attributed to a registered author.
+
+### Phase 6.1 Lessons Learned
+
+- The 010 boundary paid off exactly as designed: memory writes reuse the
+  *same* `ToolServerHandle::call_tool` path as retrieval, so the only new
+  mechanism was a trait + a thin impl. No REST client, no second protocol, no
+  new dependency (author ids cross the trait as opaque `String`). "Same seam"
+  was real, not aspirational.
+- The streamlining insight held: persistent memory did **not** need
+  `mv-server`. Continuity is about durable state (which klams owns), not about
+  staying resident — so the CLI got memory now, and 6.3's server becomes a
+  later consumer of the same `MemoryStore`.
+- The stateful fake was the unlock for testing memory honestly: making
+  `FakeKlams` accumulate writes let a *write→recall round-trip across two
+  separate CLI processes* be proven hermetically (the fixture lives in the
+  test process; both subprocesses talk to it). A static fake could only have
+  proven reads.
+- One deviation worth flagging forward: the model's memory-capability note
+  rides the **prompt prefix**, not a true system-preamble suffix — the
+  preamble is hardcoded at the four provider call sites and threading an
+  override through `complete`/`complete_chain` wasn't worth it for v1. If
+  agent writes prove unreliable, that threading (or a typed `memory_add`
+  wrapper tool) is the next step.
+- `mv-cli` has no library target, so `KlamsMemory` can't be imported by
+  `tests/`. Its wire behavior is proven black-box through the CLI; only pure
+  render/parse logic is unit-tested in-crate. Worth remembering before
+  promising "integration-test X directly" for any binary-crate type.
 
 ### Phase 6.2: DSL Completion (sprint 012)
 

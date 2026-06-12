@@ -5,7 +5,8 @@
 
 **Tests**: TDD per Principle III — failing hermetic test first. klams writes
 are proven against the stateful FakeKlams; live kubs0 tests stay `#[ignore]`d
-and self-clean.
+(test writes are session-tagged for manual pruning — the CLI has no delete
+surface this sprint).
 
 ## Format
 
@@ -104,13 +105,13 @@ green.
 
 ## Phase 5: WS5 — Docs truth pass (polish)
 
-- [ ] T010 [WS5] docs/08: "Memory (writes)" section — scope (`--session`),
+- [X] T010 [WS5] docs/08: "Memory (writes)" section — scope (`--session`),
   attribution model, the preamble addendum, degradation incl. maintenance
   window, pointer to contract v1.1 (FR-008)
-- [ ] T011 [P] [WS5] README: `--session` usage + memory behavior; docs/01:
+- [X] T011 [P] [WS5] README: `--session` usage + memory behavior; docs/01:
   memory seam (trait in core, impl in binary) + sprint-011 history entry
   (FR-008)
-- [ ] T012 [P] [WS5] Roadmap: Phase 6.1 checkboxes + lessons learned at
+- [X] T012 [P] [WS5] Roadmap: Phase 6.1 checkboxes + lessons learned at
   merge (the 6.1/6.2/6.3 restructure landed with this spec) (FR-008)
 
 **Checkpoint**: SC-001–SC-006 met; sprint shippable.

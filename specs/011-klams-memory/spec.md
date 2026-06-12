@@ -79,15 +79,25 @@ operations are strictly best-effort: warn on stderr, continue.
 
 ### User Story 4 - Live round-trip on kubs0 (Priority: P3)
 
-`just test-klams` grows a live write/recall round-trip: register (as
-`multae-viae`), append a turn event, search it back, and clean up via
-`memory_delete`. Gated on `KLAMS_TOKEN` exactly like the 010 live tests.
+`just test-klams` grows a live memory round-trip driven through the CLI: two
+`--session` invocations against real klams + a real model, exercising
+register → recall → record. Gated on `KLAMS_TOKEN` (+ `KLAMS_MODEL`) like the
+010 live tests.
+
+> **Reality vs. the original sketch:** the CLI's only memory surface is
+> `--session`, so the live test drives memory through it (registering as the
+> CLI's fixed agent `mv-cli`, session `mv-live-memory-test`) rather than a
+> direct register/append/search call. There is **no `memory_delete` cleanup** —
+> the CLI exposes no delete affordance this sprint, so test writes are
+> identifiable by session for manual pruning (the user's klams tooling lists by
+> author/session). Auto-cleanup would require either a delete affordance or a
+> direct-API test harness — deferred (YAGNI).
 
 **Acceptance Scenarios**:
 
-1. **Given** kubs0 reachable and the `Read|Write` token, **When**
-   `just test-klams` runs, **Then** the write round-trip passes and the test
-   soft-deletes what it wrote.
+1. **Given** kubs0 reachable and the `Read|Write` token + a model, **When**
+   `just test-klams` runs, **Then** both `--session` invocations succeed,
+   proving the register/recall/record path executes live end-to-end.
 
 ## Requirements
 
@@ -116,9 +126,12 @@ operations are strictly best-effort: warn on stderr, continue.
   grows the write tools, asserting attribution (the registered
   `author_id` on every write) — so write→recall round-trips are provable
   hermetically across two CLI invocations.
-- **FR-007**: Live tests: a kubs0 write/recall round-trip as agent
-  `multae-viae`, self-cleaning via `memory_delete`, `#[ignore]`d behind
-  `just test-klams`, skipping without `KLAMS_TOKEN`.
+- **FR-007**: Live tests: a kubs0 memory round-trip driven through two
+  `--session` CLI invocations (real klams + model), `#[ignore]`d behind
+  `just test-klams`, skipping without `KLAMS_TOKEN`/`KLAMS_MODEL`. Writes are
+  attributed (agent `mv-cli`, session `mv-live-memory-test`) for manual
+  pruning — no `memory_delete` cleanup (the CLI has no delete surface; see
+  US4).
 - **FR-008**: Docs are part of done: docs/08 gains the memory/write story
   (scope, attribution, degradation); docs/01 sprint entry; README
   `--session` usage; roadmap Phase 6.1 checkboxes + lessons learned at
@@ -139,5 +152,5 @@ operations are strictly best-effort: warn on stderr, continue.
   a warning; no hang, no failure.
 - **SC-005**: `just ci` stays green and hermetic; default suite wall time
   stays ≤ 10s.
-- **SC-006**: (Live, opt-in) `just test-klams` write/recall round-trip on
-  kubs0 passes and cleans up after itself.
+- **SC-006**: (Live, opt-in) `just test-klams` memory round-trip on kubs0 —
+  two `--session` invocations succeed, proving register/recall/record live.
