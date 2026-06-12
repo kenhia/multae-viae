@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use serde_json::Value;
 use tracing::{debug, info};
 
 use super::retry::execute_tool_with_error_handling;
@@ -46,31 +47,38 @@ pub trait ToolExecutor: Send + Sync {
 /// callers — go through the accessors.
 #[derive(Debug, Clone)]
 pub struct ExecutionContext {
-    inputs: HashMap<String, String>,
-    outputs: HashMap<String, String>,
+    inputs: HashMap<String, Value>,
+    outputs: HashMap<String, Value>,
 }
 
 impl ExecutionContext {
+    /// Build a context from CLI/workflow inputs. Inputs arrive as strings (the
+    /// `--input KEY=VALUE` boundary) and are stored as `Value::String`;
+    /// structure enters the context later, via `extract_json` and nested
+    /// workflow outputs.
     pub fn new(inputs: HashMap<String, String>) -> Self {
         Self {
-            inputs,
+            inputs: inputs
+                .into_iter()
+                .map(|(k, v)| (k, Value::String(v)))
+                .collect(),
             outputs: HashMap::new(),
         }
     }
 
-    /// Record a step output. Outputs shadow inputs of the same name in
-    /// subsequent template contexts.
-    pub fn insert_output(&mut self, name: impl Into<String>, value: String) {
+    /// Record a step output as a typed value. Outputs shadow inputs of the same
+    /// name in subsequent template contexts.
+    pub fn insert_output(&mut self, name: impl Into<String>, value: Value) {
         self.outputs.insert(name.into(), value);
     }
 
     /// Look up a recorded step output.
-    pub fn output(&self, name: &str) -> Option<&str> {
-        self.outputs.get(name).map(String::as_str)
+    pub fn output(&self, name: &str) -> Option<&Value> {
+        self.outputs.get(name)
     }
 
     /// Build a template variable map: outputs shadow inputs.
-    pub fn to_template_context(&self) -> HashMap<String, String> {
+    pub fn to_template_context(&self) -> HashMap<String, Value> {
         let mut vars = self.inputs.clone();
         vars.extend(self.outputs.clone());
         vars
@@ -84,7 +92,7 @@ impl ExecutionContext {
 
     /// Outputs present here but not in `base` — the new outputs a parallel
     /// child produced on top of its fork snapshot, for merging at the join.
-    pub fn outputs_added_since(&self, base: &ExecutionContext) -> Vec<(String, String)> {
+    pub fn outputs_added_since(&self, base: &ExecutionContext) -> Vec<(String, Value)> {
         self.outputs
             .iter()
             .filter(|(name, _)| !base.outputs.contains_key(*name))
@@ -93,10 +101,11 @@ impl ExecutionContext {
     }
 }
 
-/// Result of executing a workflow.
+/// Result of executing a workflow. Output values are typed; a front end prints
+/// strings raw and everything else as JSON (see `commands/workflow.rs`).
 #[derive(Debug)]
 pub struct WorkflowResult {
-    pub outputs: HashMap<String, String>,
+    pub outputs: HashMap<String, Value>,
 }
 
 /// Defaults applied to prompt steps that don't override them.
@@ -233,7 +242,10 @@ async fn execute_steps<P: PromptExecutor, T: ToolExecutor>(
         let output_len = step
             .output()
             .and_then(|name| ctx.output(name))
-            .map_or(0, str::len);
+            // A string value's own length; otherwise its JSON length.
+            .map_or(0, |v| {
+                v.as_str().map_or_else(|| v.to_string().len(), str::len)
+            });
         info!(
             step_id = %step.id(),
             output_name,
@@ -300,7 +312,8 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
                     step: ps.id.clone(),
                     source: Box::new(e),
                 })?;
-            ctx.insert_output(&ps.output, output);
+            // Model output is text; structure enters via `extract_json`.
+            ctx.insert_output(&ps.output, Value::String(output));
         }
         Step::Tool(ts) => {
             // Render tool inputs from context — every string leaf, including
@@ -313,7 +326,8 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
 
             let output =
                 execute_tool_with_error_handling(ts, &rendered_inputs, tool_executor).await?;
-            ctx.insert_output(&ts.output, output);
+            // Tool output is text (truncated upstream); structure via transform.
+            ctx.insert_output(&ts.output, Value::String(output));
         }
         Step::Transform(ts) => {
             let vars = ctx.to_template_context();
@@ -407,7 +421,7 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
 /// interpolates instead of passing the literal braces to the tool.
 fn render_json_value(
     val: &serde_json::Value,
-    vars: &HashMap<String, String>,
+    vars: &HashMap<String, Value>,
     step_id: &str,
 ) -> Result<serde_json::Value, MvError> {
     Ok(match val {
@@ -444,7 +458,7 @@ fn step_type_name(step: &Step) -> &'static str {
     }
 }
 
-fn build_workflow_outputs(workflow: &Workflow, ctx: &ExecutionContext) -> HashMap<String, String> {
+fn build_workflow_outputs(workflow: &Workflow, ctx: &ExecutionContext) -> HashMap<String, Value> {
     if workflow.outputs.is_empty() {
         // When no outputs specified, return the last step's output (if it is a
         // leaf step that produced one — a trailing branch has no single output).
@@ -452,7 +466,7 @@ fn build_workflow_outputs(workflow: &Workflow, ctx: &ExecutionContext) -> HashMa
         if let Some(output_name) = workflow.steps.last().and_then(|s| s.output())
             && let Some(value) = ctx.output(output_name)
         {
-            map.insert(output_name.to_string(), value.to_string());
+            map.insert(output_name.to_string(), value.clone());
         }
         map
     } else {
@@ -466,7 +480,7 @@ fn build_workflow_outputs(workflow: &Workflow, ctx: &ExecutionContext) -> HashMa
                 let step = super::types::find_step(&workflow.steps, &wo.from)?;
                 let output_name = step.output()?;
                 ctx.output(output_name)
-                    .map(|v| (wo.name.clone(), v.to_string()))
+                    .map(|v| (wo.name.clone(), v.clone()))
             })
             .collect()
     }
@@ -577,7 +591,10 @@ mod tests {
                 .into_iter()
                 .collect(),
         );
-        ctx.insert_output("topic".to_string(), "output_value".to_string());
+        ctx.insert_output(
+            "topic".to_string(),
+            Value::String("output_value".to_string()),
+        );
         let vars = ctx.to_template_context();
         assert_eq!(vars["topic"], "output_value");
     }
@@ -589,7 +606,10 @@ mod tests {
                 .into_iter()
                 .collect(),
         );
-        ctx.insert_output("output_key".to_string(), "output_val".to_string());
+        ctx.insert_output(
+            "output_key".to_string(),
+            Value::String("output_val".to_string()),
+        );
         let vars = ctx.to_template_context();
         assert_eq!(vars["input_key"], "input_val");
         assert_eq!(vars["output_key"], "output_val");
@@ -1632,8 +1652,7 @@ steps:
     #[test]
     fn extract_json_valid() {
         let input = r#"{"title": "Rust Guide", "sections": 5}"#;
-        let result = execute_transform("test", "extract_json", input, None).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let parsed = execute_transform("test", "extract_json", input, None).unwrap();
         assert_eq!(parsed["title"], "Rust Guide");
         assert_eq!(parsed["sections"], 5);
     }
@@ -1647,8 +1666,7 @@ steps:
 ```
 
 That's it."#;
-        let result = execute_transform("test", "extract_json", input, None).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let parsed = execute_transform("test", "extract_json", input, None).unwrap();
         assert_eq!(parsed["key"], "value");
     }
 
@@ -1662,8 +1680,7 @@ That's it."#;
     fn extract_json_schema_pass() {
         let schema = serde_json::json!({"title": "", "count": 0});
         let input = r#"{"title": "Hello", "count": 42, "extra": true}"#;
-        let result = execute_transform("test", "extract_json", input, Some(&schema)).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let parsed = execute_transform("test", "extract_json", input, Some(&schema)).unwrap();
         assert_eq!(parsed["title"], "Hello");
     }
 

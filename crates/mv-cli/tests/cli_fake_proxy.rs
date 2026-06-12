@@ -526,10 +526,11 @@ outputs:
         .success();
 
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
-    // The final output is the parsed JSON re-serialized by extract_json —
-    // fences stripped, content intact.
+    // The final output is the parsed JSON — fences stripped, content intact.
+    // Sprint 012: a non-string output value prints as pretty JSON
+    // (`"count": 1`), not the old compact re-serialization.
     assert!(
-        stdout.contains("marker-e2e.txt") && stdout.contains("\"count\":1"),
+        stdout.contains("marker-e2e.txt") && stdout.contains("\"count\": 1"),
         "expected extracted JSON in workflow output, got:\n{stdout}"
     );
     assert!(
@@ -545,5 +546,82 @@ outputs:
     assert!(
         prompt_request.contains("marker-e2e.txt"),
         "prompt request should embed the tool step output: {prompt_request}"
+    );
+}
+
+// --- 012/WS2: typed context — field access + numeric branch condition ---
+
+#[test]
+fn structured_value_field_access_and_numeric_branch() {
+    // The model returns JSON with score 10. `extract_json` stores it as a typed
+    // Value, so `result.score >= 8` is a NUMERIC comparison (10 >= 8 → true).
+    // A string compare would give "10" >= "8" → false (lexicographic), so the
+    // then-arm running proves typed evaluation. The then-arm template reaches
+    // into `result.title`, proving field access.
+    let s = setup();
+    s.proxy.mount_health_ok();
+    s.proxy
+        .mount_chat_text("{\"title\": \"Rust Guide\", \"score\": 10}");
+
+    let wf_path = s.dir.path().join("typed.yaml");
+    std::fs::write(
+        &wf_path,
+        format!(
+            r#"
+name: typed
+version: "1.0"
+defaults:
+  model: {MODEL_ID}
+steps:
+  - id: gen
+    type: prompt
+    output: raw
+    template: "Return JSON"
+  - id: extract
+    type: transform
+    output: result
+    operation: extract_json
+    input: "{{{{raw}}}}"
+  - id: route
+    type: branch
+    condition: "result.score >= 8"
+    then:
+      - id: deep
+        type: prompt
+        output: summary
+        template: "DETAILED about {{{{result.title}}}}"
+    else:
+      - id: quick
+        type: prompt
+        output: summary
+        template: "QUICK only"
+"#
+        ),
+    )
+    .unwrap();
+
+    cmd()
+        .current_dir(s.dir.path())
+        .args([
+            "workflow",
+            "run",
+            wf_path.to_str().unwrap(),
+            "--config",
+            s.config.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // The second completion request is the branch arm. It must be the THEN arm
+    // (numeric 10 >= 8) and must carry the field-accessed title.
+    let bodies = s.proxy.chat_request_bodies();
+    let arm_req = serde_json::to_string(bodies.last().unwrap()).unwrap();
+    assert!(
+        arm_req.contains("DETAILED about Rust Guide"),
+        "then-arm with field access expected; got: {arm_req}"
+    );
+    assert!(
+        !arm_req.contains("QUICK only"),
+        "else-arm must not run (numeric 10 >= 8 is true): {arm_req}"
     );
 }

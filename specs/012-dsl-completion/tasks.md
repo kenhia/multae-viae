@@ -39,22 +39,22 @@ shipped examples pinned by validate tests.
 
 ## Phase 2: WS2 — Value context migration
 
-- [ ] T004 [WS2] Migrate `workflow/template.rs` + `workflow/engine.rs` +
+- [X] T004 [WS2] Migrate `workflow/template.rs` + `workflow/engine.rs` +
   `workflow/transform.rs` to `HashMap<String, serde_json::Value>` contexts:
   `render_template`/`evaluate_condition`, `ExecutionContext`,
   `validate_inputs`, `render_json_value`, `build_workflow_outputs`,
   `WorkflowResult.outputs`; CLI inputs and prompt/tool results enter as
   `Value::String`; `extract_json` stores the parsed `Value` (FR-004, FR-006)
-- [ ] T005 [WS2] Pin the rendering rules with unit tests: string values
+- [X] T005 [WS2] Pin the rendering rules with unit tests: string values
   interpolate raw; whole-container interpolation behavior recorded (test is
   the spec); typed comparisons in conditions (`a.b >= 8` numeric;
   `"false"`-truthiness retired for typed values); output printing rule
   (strings raw, non-strings compact JSON) in `commands/workflow.rs` text +
   `--json` (FR-005)
-- [ ] T006 [WS2] Field-access e2e (the docs/06 pattern, hermetic): prompt →
+- [X] T006 [WS2] Field-access e2e (the docs/06 pattern, hermetic): prompt →
   `extract_json` → branch on numeric `score` → template `{{out.title}}`
   (SC-002)
-- [ ] T007 [WS2] Back-compat sweep: every pre-012 workflow test/example
+- [X] T007 [WS2] Back-compat sweep: every pre-012 workflow test/example
   passes with at most mechanical expectation changes — anything more is a
   design bug, not a test chore (FR-007, SC-005)
 
