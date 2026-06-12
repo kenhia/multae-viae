@@ -41,16 +41,19 @@ are actionable and non-fatal; `just ci` green.
 
 ## Phase 2: WS2 — Fake klams + agentic retrieval
 
-- [ ] T004 [WS2] Fake klams MCP server (extend
-  `crates/mv-cli/tests/support/` / the 008 fake-MCP binary): Streamable HTTP,
-  rejects requests without the expected bearer token, implements
-  `memory_search` returning `PublicMemory` knowledge items per
-  contracts/klams-tool-surface.md with realistic ~800-char `text` payloads;
-  seedable results (FR-003)
-- [ ] T005 [WS2] Hermetic agentic e2e (`crates/mv-cli/tests/cli_klams.rs`):
+- [X] T004 [WS2] Fake klams MCP server (`FakeKlams` in
+  `crates/mv-cli/tests/support/`): wiremock-based Streamable HTTP, requires the
+  exact bearer header on `/mcp`, implements the rmcp JSON-RPC subset
+  (initialize + `Mcp-Session-Id`, GET→405 SSE decline, tools/list, tools/call)
+  with a custom `Respond` echoing the request id; `memory_search` returns
+  `PublicMemory` knowledge items per the contract with ~800-char `text`;
+  seedable (FR-003). *In-process like `FakeProxy` (not a spawned bin), so it
+  lives in dev-dep context. Resolves the rmcp HTTP-session risk hermetically.*
+- [X] T005 [WS2] Hermetic agentic e2e (`crates/mv-cli/tests/cli_klams.rs`):
   prompt run against fake proxy + fake klams where the agent's
-  `memory_search` call retrieves seeded content that shapes the final
-  answer; bearer header asserted server-side (FR-004, SC-001)
+  `memory_search` call retrieves seeded content; proven by the marker reaching
+  the model's follow-up request and the bearer reaching klams on the wire
+  (FR-004, SC-001)
 
 **Checkpoint**: the Phase 5.5 deliverable proven hermetically in agentic form.
 
