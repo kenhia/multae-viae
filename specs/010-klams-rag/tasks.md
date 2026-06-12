@@ -1,6 +1,6 @@
 # Tasks: RAG via klams Memory Service
 
-**Input**: Design documents from `/specs/010-klams-rag/`
+**Input**: Design documents from `/specs/010-klams-rag/`  
 **Prerequisites**: plan.md, spec.md, contracts/klams-tool-surface.md
 
 **Tests**: TDD per Principle III — failing hermetic test first. klams behavior
@@ -17,17 +17,22 @@ is faked with klams wire shapes (contract doc); live kubs0 tests stay
 
 ## Phase 1: WS1 — MCP bearer auth
 
-- [ ] T001 [WS1] `auth_token_env: Option<String>` on `McpServerConfig`
+- [X] T001 [WS1] `auth_token_env: Option<String>` on `McpServerConfig`
   (`crates/mv-core/src/mcp/config.rs`); validation rejects it on `stdio`
   transport; parse + validation tests (FR-001)
-- [ ] T002 [WS1] `connect_http` (`crates/mv-core/src/mcp/client.rs`) resolves
+- [X] T002 [WS1] `connect_http` (`crates/mv-core/src/mcp/client.rs`) resolves
   the env var and builds the `reqwest::Client` with a default
   `Authorization: Bearer` header; missing/empty var → actionable `MvError`
   naming variable + server, surfaced via the existing log-and-skip path;
-  unit tests incl. header presence via a wiremock-style assertion (FR-001)
-- [ ] T003 [P] [WS1] Token secrecy: `--verbose` CLI run with a known token
+  unit tests (FR-001). *Extracted `build_http_client()`; header value marked
+  `set_sensitive(true)` so reqwest redacts it in Debug/connection logs.
+  Live header-on-the-wire assertion deferred to the WS2 fake klams (T004),
+  which checks the bearer server-side — the real proof.*
+- [X] T003 [P] [WS1] Token secrecy: `--verbose` CLI run with a known token
   value asserts the value never reaches stderr; error text names the
-  variable, not the value (FR-002)
+  variable, not the value (FR-002). *`crates/mv-cli/tests/cli_mcp_auth.rs`:
+  present-token verbose run (value absent) + missing-var run (names var +
+  server, non-fatal).*
 
 **Checkpoint**: m-v can connect to a bearer-auth'd HTTP MCP server; failures
 are actionable and non-fatal; `just ci` green.

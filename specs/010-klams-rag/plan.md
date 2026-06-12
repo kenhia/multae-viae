@@ -1,6 +1,6 @@
 # Implementation Plan: RAG via klams Memory Service
 
-**Branch**: `010-klams-rag` | **Spec**: [spec.md](spec.md)
+**Branch**: `010-klams-rag` | **Spec**: [spec.md](spec.md)  
 **Research**: [docs/08-rag-integration.md](../../docs/08-rag-integration.md)
 (original design sketch — this sprint replaces its krag/qdrant/ollama plan
 with klams and rewrites the doc), klams assessment (2026-06-12, this
@@ -9,13 +9,13 @@ session), contract pin in
 
 ## Technical Context
 
-**Language**: Rust edition 2024, workspace (`mv-core` lib, `mv-cli` bin)
+**Language**: Rust edition 2024, workspace (`mv-core` lib, `mv-cli` bin)  
 **Key deps**: rig-core 0.35, rmcp (client; klams's server is rmcp 1.7 — same
-SDK both sides), reqwest (auth header injection), serde_yml, tokio
+SDK both sides), reqwest (auth header injection), serde_yml, tokio  
 **New deps**: none expected — bearer auth is a reqwest default-header on the
-existing `StreamableHttpClientTransport::with_client` seam
+existing `StreamableHttpClientTransport::with_client` seam  
 **Testing**: `just ci` hermetic; fake klams MCP server extends the 008
-fake-MCP infrastructure; live kubs0 tests `#[ignore]`d behind `just test-klams`
+fake-MCP infrastructure; live kubs0 tests `#[ignore]`d behind `just test-klams`  
 
 ## Constitution Check
 

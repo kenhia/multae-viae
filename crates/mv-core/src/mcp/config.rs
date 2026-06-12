@@ -24,6 +24,11 @@ pub struct McpServerConfig {
     #[serde(default)]
     pub env: HashMap<String, String>,
     pub url: Option<String>,
+    /// Name of an environment variable holding a bearer token to send as
+    /// `Authorization: Bearer <token>` on every request. HTTP transport only
+    /// (validation rejects it on stdio). The secret is the variable's *value*,
+    /// resolved at connect time — it never appears in config or logs.
+    pub auth_token_env: Option<String>,
 }
 
 /// YAML wrapper for the MCP servers configuration file.
@@ -84,6 +89,16 @@ impl McpServersConfig {
                         return Err(MvError::McpServerError {
                             server: server.name.clone(),
                             details: "stdio transport requires 'command'".to_string(),
+                        });
+                    }
+                    // Bearer auth is an HTTP concept; a stdio server's secrets
+                    // flow through the `env:` map instead.
+                    if server.auth_token_env.is_some() {
+                        return Err(MvError::McpServerError {
+                            server: server.name.clone(),
+                            details: "auth_token_env is only valid for http transport \
+                                      (stdio servers pass secrets via 'env')"
+                                .to_string(),
                         });
                     }
                 }
@@ -151,6 +166,38 @@ servers:
         assert_eq!(s.name, "rag");
         assert_eq!(s.transport, McpTransportType::Http);
         assert_eq!(s.url.as_deref(), Some("http://192.168.1.100:8080/mcp"));
+    }
+
+    #[test]
+    fn parse_http_server_with_auth_token_env() {
+        let yaml = r#"
+servers:
+  - name: klams
+    transport: http
+    url: http://kubs0:7777/mcp
+    auth_token_env: KLAMS_TOKEN
+"#;
+        let config = parse(yaml).unwrap();
+        let s = &config.servers[0];
+        assert_eq!(s.auth_token_env.as_deref(), Some("KLAMS_TOKEN"));
+    }
+
+    #[test]
+    fn auth_token_env_rejected_on_stdio() {
+        let yaml = r#"
+servers:
+  - name: bad
+    transport: stdio
+    command: npx
+    auth_token_env: SOME_TOKEN
+"#;
+        let err = parse(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("auth_token_env is only valid for http"),
+            "{msg}"
+        );
+        assert!(msg.contains("bad"), "{msg}");
     }
 
     #[test]
@@ -239,5 +286,6 @@ servers:
         assert!(s.args.is_empty());
         assert!(s.env.is_empty());
         assert!(s.url.is_none());
+        assert!(s.auth_token_env.is_none());
     }
 }

@@ -1,8 +1,8 @@
 # Feature Specification: RAG via klams Memory Service
 
-**Feature Branch**: `010-klams-rag`
-**Created**: 2026-06-12
-**Status**: Draft
+**Feature Branch**: `010-klams-rag`  
+**Created**: 2026-06-12  
+**Status**: Draft  
 **Input**: Phase 5.5 from docs/09-roadmap.md — retrieval-augmented context for
 agent workflows. Backend decision (2026-06-12): **klams** (Ken's Local Agent
 Memory System, Rust, already deployed on kubs0) replaces the originally
