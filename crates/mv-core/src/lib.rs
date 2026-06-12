@@ -421,6 +421,15 @@ pub enum MvError {
     #[error("memory operation '{op}' failed: {details}")]
     MemoryError { op: String, details: String },
 
+    /// A nested `workflow` step would re-enter a workflow already running in
+    /// the current call chain — an infinite recursion, rejected with the chain.
+    #[error("workflow cycle detected: {chain}")]
+    WorkflowCycle { chain: String },
+
+    /// Nested `workflow` steps exceeded the maximum allowed depth.
+    #[error("nested workflow depth exceeded the limit of {max}")]
+    WorkflowDepthExceeded { max: usize },
+
     /// The model backend was *reached* but answered with an error status
     /// (e.g. Ollama 500 `llama runner process has terminated`). Distinct from
     /// `BackendUnreachable` (a transport failure) — saying "Is the server

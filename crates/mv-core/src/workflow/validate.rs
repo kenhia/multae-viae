@@ -58,6 +58,10 @@ pub enum ValidationError {
     InvalidLoopMaxIterations {
         step_id: String,
     },
+    SubWorkflowInvalid {
+        step_id: String,
+        details: String,
+    },
     EmptyPreferList {
         step_id: String,
     },
@@ -137,6 +141,9 @@ impl std::fmt::Display for ValidationError {
             }
             Self::InvalidLoopMaxIterations { step_id } => {
                 write!(f, "loop step '{step_id}' must have max_iterations >= 1")
+            }
+            Self::SubWorkflowInvalid { step_id, details } => {
+                write!(f, "workflow step '{step_id}': nested workflow {details}")
             }
             Self::EmptyPreferList { step_id } => {
                 write!(
@@ -498,6 +505,46 @@ fn validate_steps(
                     available.insert(name.clone());
                     defined_here.insert(name);
                 }
+            }
+            Step::SubWorkflow(sw) => {
+                // Templated inputs must reference resolvable variables.
+                for tmpl in sw.inputs.values() {
+                    check_template(&sw.id, tmpl, None, &available, input_names, errors);
+                }
+
+                // When the directory is known, load and validate the child one
+                // cross-file level deep. The child is validated with `None` as
+                // its directory, so its OWN `workflow` steps are not followed
+                // here — that bounds recursion (a cyclic pair cannot loop the
+                // validator) and defers deeper checks (and cycle/depth) to
+                // runtime. This still catches a missing, unparseable, or
+                // structurally-broken direct child.
+                if let Some(dir) = workflow_dir {
+                    let child_path = dir.join(&sw.file);
+                    match super::parser::load_from_file(&child_path) {
+                        Ok(child_wf) => {
+                            if let Some(first) = validate(&child_wf, None).into_iter().next() {
+                                errors.push(ValidationError::SubWorkflowInvalid {
+                                    step_id: sw.id.clone(),
+                                    details: format!("'{}' is invalid: {first}", sw.file),
+                                });
+                            }
+                        }
+                        Err(e) => errors.push(ValidationError::SubWorkflowInvalid {
+                            step_id: sw.id.clone(),
+                            details: e.to_string(),
+                        }),
+                    }
+                }
+
+                register_output(
+                    &sw.id,
+                    &sw.output,
+                    input_names,
+                    &mut available,
+                    &mut defined_here,
+                    errors,
+                );
             }
         }
     }
@@ -1436,6 +1483,58 @@ steps:
             errors.iter().any(
                 |e| matches!(e, ValidationError::EmptyParallel { step_id } if step_id == "fan")
             ),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn subworkflow_broken_child_fails_parent_validation() {
+        // `workflow validate` loads the child (dir known) and validates it; a
+        // child with an unresolvable template reference fails the parent.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("child.yaml"),
+            "name: child\nversion: \"1.0\"\nsteps:\n  - id: bad\n    type: prompt\n    \
+             output: o\n    template: \"{{undefined_var}}\"\n",
+        )
+        .unwrap();
+        let parent = r#"
+name: parent
+version: "1.0"
+steps:
+  - id: sub
+    type: workflow
+    file: child.yaml
+    output: result
+"#;
+        let wf = parser::load_from_str(parent, "parent.yaml").unwrap();
+        let errors = validate(&wf, Some(dir.path()));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::SubWorkflowInvalid { step_id, .. } if step_id == "sub")),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn subworkflow_missing_child_fails_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = r#"
+name: parent
+version: "1.0"
+steps:
+  - id: sub
+    type: workflow
+    file: nope.yaml
+    output: result
+"#;
+        let wf = parser::load_from_str(parent, "parent.yaml").unwrap();
+        let errors = validate(&wf, Some(dir.path()));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::SubWorkflowInvalid { .. })),
             "got: {errors:?}"
         );
     }

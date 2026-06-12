@@ -85,14 +85,14 @@ shipped examples pinned by validate tests.
 
 ## Phase 4: WS4 — `workflow` (nested) step
 
-- [ ] T011 [WS4] `Step::SubWorkflow { id, name?, file, inputs?, output }`
+- [X] T011 [WS4] `Step::SubWorkflow { id, name?, file, inputs?, output }`
   (`type: workflow`) in types + parser; parse tests (FR-009)
-- [ ] T012 [WS4] Safety + validation: canonicalized path-chain cycle
+- [X] T012 [WS4] Safety + validation: canonicalized path-chain cycle
   detection (error names the chain) + `MAX_WORKFLOW_DEPTH` cap; `workflow
   validate` recursively loads + validates children when the parent's dir is
   known (missing file → actionable path error); runtime re-validates on
   load; tests incl. self-cycle, two-file cycle, over-deep chain (FR-010)
-- [ ] T013 [WS4] Engine: templated `inputs` map → isolated child context
+- [X] T013 [WS4] Engine: templated `inputs` map → isolated child context
   (declared inputs only) → `execute_workflow` recursion (`Box::pin`) → child
   outputs as one JSON object at `output`; mock-executor tests + e2e
   (`workflows/examples/subworkflow-example.yaml` + child file, downstream

@@ -97,6 +97,8 @@ pub enum Step {
     Parallel(ParallelStep),
     #[serde(rename = "loop")]
     Loop(LoopStep),
+    #[serde(rename = "workflow")]
+    SubWorkflow(SubWorkflowStep),
 }
 
 impl Step {
@@ -108,17 +110,20 @@ impl Step {
             Step::Branch(s) => &s.id,
             Step::Parallel(s) => &s.id,
             Step::Loop(s) => &s.id,
+            Step::SubWorkflow(s) => &s.id,
         }
     }
 
     /// The single output name a leaf step produces, or `None` for control-flow
     /// steps (`branch`, `parallel`, `loop`) whose outputs come from their
-    /// nested steps.
+    /// nested steps. A nested `workflow` step *does* produce one output (the
+    /// child's outputs, as an object), so it behaves like a leaf here.
     pub fn output(&self) -> Option<&str> {
         match self {
             Step::Prompt(s) => Some(&s.output),
             Step::Tool(s) => Some(&s.output),
             Step::Transform(s) => Some(&s.output),
+            Step::SubWorkflow(s) => Some(&s.output),
             Step::Branch(_) | Step::Parallel(_) | Step::Loop(_) => None,
         }
     }
@@ -131,6 +136,7 @@ impl Step {
             Step::Branch(s) => s.name.as_deref(),
             Step::Parallel(s) => s.name.as_deref(),
             Step::Loop(s) => s.name.as_deref(),
+            Step::SubWorkflow(s) => s.name.as_deref(),
         }
     }
 }
@@ -238,6 +244,26 @@ pub struct LoopStep {
     #[serde(default)]
     pub exit_condition: Option<String>,
     pub steps: Vec<Step>,
+}
+
+/// A nested-workflow step — runs another workflow file as a single step.
+///
+/// `file` resolves relative to the parent workflow's directory. `inputs` are
+/// templated against the parent context and passed as the child's inputs (the
+/// child sees ONLY these — no parent-context leakage). The child's declared
+/// outputs are collected into one JSON object stored at `output`, so a later
+/// step can reach into them (`{{sub.answer}}`). Cross-file cycles and nesting
+/// beyond the depth cap are rejected.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubWorkflowStep {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub file: String,
+    #[serde(default)]
+    pub inputs: HashMap<String, String>,
+    pub output: String,
 }
 
 /// Error handling strategy for tool steps.
@@ -349,7 +375,9 @@ fn collect_model_references(steps: &[Step], refs: &mut Vec<(String, String)>) {
             }
             Step::Parallel(par) => collect_model_references(&par.steps, refs),
             Step::Loop(ls) => collect_model_references(&ls.steps, refs),
-            Step::Tool(_) | Step::Transform(_) => {}
+            // A nested workflow's model references live in its own file, checked
+            // when that file is loaded/validated — nothing to collect here.
+            Step::Tool(_) | Step::Transform(_) | Step::SubWorkflow(_) => {}
         }
     }
 }

@@ -172,6 +172,33 @@ pub async fn execute_workflow<P: PromptExecutor, T: ToolExecutor>(
     workflow_dir: &Path,
     default_model: &str,
 ) -> Result<WorkflowResult, MvError> {
+    execute_workflow_inner(
+        workflow,
+        inputs,
+        prompt_executor,
+        tool_executor,
+        workflow_dir,
+        default_model,
+        &[],
+    )
+    .await
+}
+
+/// Maximum nesting depth for `workflow` steps (a child running a child …).
+const MAX_WORKFLOW_DEPTH: usize = 8;
+
+/// The real workflow body, threading `chain` — the canonical paths of nested
+/// workflows currently executing — so a `workflow` step can reject a cycle or
+/// over-deep nesting before re-entering. The top-level call passes `&[]`.
+async fn execute_workflow_inner<P: PromptExecutor, T: ToolExecutor>(
+    workflow: &Workflow,
+    inputs: HashMap<String, String>,
+    prompt_executor: &P,
+    tool_executor: &T,
+    workflow_dir: &Path,
+    default_model: &str,
+    chain: &[std::path::PathBuf],
+) -> Result<WorkflowResult, MvError> {
     // Validate inputs
     let resolved_inputs = validate_inputs(workflow, inputs)?;
     let mut ctx = ExecutionContext::new(resolved_inputs);
@@ -194,6 +221,8 @@ pub async fn execute_workflow<P: PromptExecutor, T: ToolExecutor>(
         prompt_executor,
         tool_executor,
         workflow_dir,
+        default_model,
+        chain,
     )
     .await?;
 
@@ -206,6 +235,7 @@ pub async fn execute_workflow<P: PromptExecutor, T: ToolExecutor>(
 
 /// Run a step list against a mutable context. Recurses into nested step lists
 /// (the `branch` arms) via `Box::pin` for the async recursion.
+#[allow(clippy::too_many_arguments)]
 async fn execute_steps<P: PromptExecutor, T: ToolExecutor>(
     steps: &[Step],
     ctx: &mut ExecutionContext,
@@ -213,6 +243,8 @@ async fn execute_steps<P: PromptExecutor, T: ToolExecutor>(
     prompt_executor: &P,
     tool_executor: &T,
     workflow_dir: &Path,
+    default_model: &str,
+    chain: &[std::path::PathBuf],
 ) -> Result<(), MvError> {
     for step in steps {
         let step_span = tracing::info_span!(
@@ -233,6 +265,8 @@ async fn execute_steps<P: PromptExecutor, T: ToolExecutor>(
             prompt_executor,
             tool_executor,
             workflow_dir,
+            default_model,
+            chain,
         )
         .await?;
 
@@ -260,6 +294,7 @@ async fn execute_steps<P: PromptExecutor, T: ToolExecutor>(
 /// Execute a single step, recording any leaf output into the context. Control
 /// steps (`branch`) mutate the context by recursing into the chosen arm rather
 /// than producing a single output.
+#[allow(clippy::too_many_arguments)]
 async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
     step: &Step,
     ctx: &mut ExecutionContext,
@@ -267,6 +302,8 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
     prompt_executor: &P,
     tool_executor: &T,
     workflow_dir: &Path,
+    default_model: &str,
+    chain: &[std::path::PathBuf],
 ) -> Result<(), MvError> {
     match step {
         Step::Prompt(ps) => {
@@ -361,6 +398,8 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
                 prompt_executor,
                 tool_executor,
                 workflow_dir,
+                default_model,
+                chain,
             ))
             .await?;
         }
@@ -378,6 +417,8 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
                         prompt_executor,
                         tool_executor,
                         workflow_dir,
+                        default_model,
+                        chain,
                     ))
                     .await
                     .map(|()| child_ctx)
@@ -428,6 +469,8 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
                     prompt_executor,
                     tool_executor,
                     workflow_dir,
+                    default_model,
+                    chain,
                 ))
                 .await?;
 
@@ -448,6 +491,84 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
                 }
             }
             debug!(step_id = %ls.id, iterations, "loop completed");
+        }
+        Step::SubWorkflow(sw) => {
+            // Resolve the child file relative to the parent's directory.
+            let child_path = workflow_dir.join(&sw.file);
+            let canonical =
+                child_path
+                    .canonicalize()
+                    .map_err(|_| MvError::WorkflowFileNotFound {
+                        path: child_path.display().to_string(),
+                    })?;
+
+            // Cycle: re-entering a workflow already running in this chain.
+            if chain.contains(&canonical) {
+                let mut rendered: Vec<String> =
+                    chain.iter().map(|p| p.display().to_string()).collect();
+                rendered.push(canonical.display().to_string());
+                return Err(MvError::WorkflowCycle {
+                    chain: rendered.join(" -> "),
+                });
+            }
+            // Depth: bound runaway nesting (chain length is the current depth).
+            if chain.len() + 1 > MAX_WORKFLOW_DEPTH {
+                return Err(MvError::WorkflowDepthExceeded {
+                    max: MAX_WORKFLOW_DEPTH,
+                });
+            }
+
+            // Load + validate the child (runtime re-validation, mirroring the
+            // template_file precedent).
+            let child_wf = super::parser::load_from_file(&canonical).map_err(|e| {
+                MvError::WorkflowStepError {
+                    step: sw.id.clone(),
+                    source: Box::new(e),
+                }
+            })?;
+            // Owned child dir so it outlives moving `canonical` into the chain.
+            let child_dir = canonical
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("."), Path::to_path_buf);
+            let verrs = super::validate::validate(&child_wf, Some(&child_dir));
+            if let Some(first) = verrs.first() {
+                return Err(MvError::WorkflowStepFailed {
+                    step: sw.id.clone(),
+                    details: format!("nested workflow '{}' is invalid: {first}", sw.file),
+                });
+            }
+
+            // Render the templated inputs against the parent context; the child
+            // sees ONLY these (no parent-context leakage).
+            let vars = ctx.to_template_context();
+            let mut child_inputs: HashMap<String, String> = HashMap::new();
+            for (key, tmpl) in &sw.inputs {
+                let rendered = template::render_template(tmpl, &vars).map_err(|e| {
+                    MvError::WorkflowTemplateError {
+                        step: sw.id.clone(),
+                        details: e.to_string(),
+                    }
+                })?;
+                child_inputs.insert(key.clone(), rendered);
+            }
+
+            let mut new_chain = chain.to_vec();
+            new_chain.push(canonical);
+            let child_result = Box::pin(execute_workflow_inner(
+                &child_wf,
+                child_inputs,
+                prompt_executor,
+                tool_executor,
+                &child_dir,
+                default_model,
+                &new_chain,
+            ))
+            .await?;
+
+            // The child's declared outputs become one object stored at `output`,
+            // so a later step can reach into them (`{{sub.answer}}`).
+            let obj: serde_json::Map<String, Value> = child_result.outputs.into_iter().collect();
+            ctx.insert_output(&sw.output, Value::Object(obj));
         }
     }
     Ok(())
@@ -493,6 +614,7 @@ fn step_type_name(step: &Step) -> &'static str {
         Step::Branch(_) => "branch",
         Step::Parallel(_) => "parallel",
         Step::Loop(_) => "loop",
+        Step::SubWorkflow(_) => "workflow",
     }
 }
 
@@ -1859,5 +1981,144 @@ outputs:
             "no condition → runs to the cap"
         );
         assert_eq!(result.outputs["result"], "c");
+    }
+
+    // --- 012/WS4: nested workflow step ---
+
+    #[tokio::test]
+    async fn subworkflow_runs_child_and_exposes_its_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("child.yaml"),
+            r#"
+name: child
+version: "1.0"
+inputs:
+  - name: topic
+    type: string
+    required: true
+steps:
+  - id: answer
+    type: prompt
+    output: answer
+    template: "About {{topic}}"
+outputs:
+  - name: answer
+    from: answer
+"#,
+        )
+        .unwrap();
+        let parent_yaml = r#"
+name: parent
+version: "1.0"
+steps:
+  - id: sub
+    type: workflow
+    file: child.yaml
+    inputs:
+      topic: "rust"
+    output: child
+  - id: use
+    type: prompt
+    output: final
+    template: "Child said: {{child.answer}}"
+outputs:
+  - name: result
+    from: use
+"#;
+        let wf = parser::load_from_str(parent_yaml, "parent.yaml").unwrap();
+        // First response = child's `answer` step; second = parent's `use` step.
+        let prompt_exec = MockPromptExecutor::new(vec!["CHILD_ANSWER", "PARENT_DONE"]);
+        let tool_exec = MockToolExecutor::always_ok("");
+
+        let result = execute_workflow(
+            &wf,
+            HashMap::new(),
+            &prompt_exec,
+            &tool_exec,
+            dir.path(),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap();
+
+        // The parent's prompt rendered the child's output via field access.
+        let calls = prompt_exec.calls();
+        assert_eq!(calls[1].0, "Child said: CHILD_ANSWER");
+        assert_eq!(result.outputs["result"], "PARENT_DONE");
+    }
+
+    #[tokio::test]
+    async fn subworkflow_cycle_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        // a.yaml → b.yaml → a.yaml
+        std::fs::write(
+            dir.path().join("a.yaml"),
+            "name: a\nversion: \"1.0\"\nsteps:\n  - id: s\n    type: workflow\n    \
+             file: b.yaml\n    output: o\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("b.yaml"),
+            "name: b\nversion: \"1.0\"\nsteps:\n  - id: s\n    type: workflow\n    \
+             file: a.yaml\n    output: o\n",
+        )
+        .unwrap();
+        let wf = parser::load_from_file(&dir.path().join("a.yaml")).unwrap();
+        let prompt_exec = MockPromptExecutor::new(vec![]);
+        let tool_exec = MockToolExecutor::always_ok("");
+
+        let err = execute_workflow(
+            &wf,
+            HashMap::new(),
+            &prompt_exec,
+            &tool_exec,
+            dir.path(),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, MvError::WorkflowCycle { .. }), "got: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn subworkflow_depth_is_bounded() {
+        // A chain n0 → n1 → … longer than MAX_WORKFLOW_DEPTH, all distinct
+        // files (no cycle), must fail with the depth error.
+        let dir = tempfile::tempdir().unwrap();
+        let n = MAX_WORKFLOW_DEPTH + 2;
+        for i in 0..n {
+            let body = if i + 1 < n {
+                format!(
+                    "name: n{i}\nversion: \"1.0\"\nsteps:\n  - id: s\n    type: workflow\n    \
+                     file: n{}.yaml\n    output: o\n",
+                    i + 1
+                )
+            } else {
+                format!(
+                    "name: n{i}\nversion: \"1.0\"\nsteps:\n  - id: s\n    type: prompt\n    \
+                     output: o\n    template: \"done\"\n"
+                )
+            };
+            std::fs::write(dir.path().join(format!("n{i}.yaml")), body).unwrap();
+        }
+        let wf = parser::load_from_file(&dir.path().join("n0.yaml")).unwrap();
+        let prompt_exec = MockPromptExecutor::new(vec!["x"; n]);
+        let tool_exec = MockToolExecutor::always_ok("");
+
+        let err = execute_workflow(
+            &wf,
+            HashMap::new(),
+            &prompt_exec,
+            &tool_exec,
+            dir.path(),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, MvError::WorkflowDepthExceeded { .. }),
+            "got: {err:?}"
+        );
     }
 }

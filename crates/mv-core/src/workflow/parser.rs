@@ -263,6 +263,32 @@ steps:
     }
 
     #[test]
+    fn parse_subworkflow_step() {
+        let yaml = r#"
+name: parent
+version: "1.0"
+steps:
+  - id: sub
+    type: workflow
+    file: child.yaml
+    inputs:
+      topic: "{{x}}"
+    output: child_out
+"#;
+        let wf = load_from_str(yaml, "test.yaml").unwrap();
+        match &wf.steps[0] {
+            Step::SubWorkflow(s) => {
+                assert_eq!(s.file, "child.yaml");
+                assert_eq!(s.inputs.get("topic").map(String::as_str), Some("{{x}}"));
+                assert_eq!(s.output, "child_out");
+            }
+            other => panic!("expected SubWorkflow, got {other:?}"),
+        }
+        // A nested workflow step produces one output (the child's outputs).
+        assert_eq!(wf.steps[0].output(), Some("child_out"));
+    }
+
+    #[test]
     fn parse_parallel_step() {
         let yaml = r#"
 name: parallel-test

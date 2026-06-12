@@ -691,3 +691,86 @@ outputs:
         "loop should exit after one iteration (2 prompts), got {chats}"
     );
 }
+
+// --- 012/WS4: nested workflow — child outputs reachable downstream ---
+
+#[test]
+fn subworkflow_child_outputs_flow_into_parent() {
+    let s = setup();
+    s.proxy.mount_health_ok();
+    s.proxy.mount_chat_text("FACTS-ABOUT-CATS");
+
+    // Child gathers notes; parent summarizes via field access {{research.notes}}.
+    std::fs::write(
+        s.dir.path().join("child.yaml"),
+        format!(
+            r#"
+name: child
+version: "1.0"
+defaults:
+  model: {MODEL_ID}
+inputs:
+  - name: subject
+    type: string
+    required: true
+steps:
+  - id: gather
+    type: prompt
+    output: notes
+    template: "Facts about {{{{subject}}}}"
+outputs:
+  - name: notes
+    from: gather
+"#
+        ),
+    )
+    .unwrap();
+    let parent_path = s.dir.path().join("parent.yaml");
+    std::fs::write(
+        &parent_path,
+        format!(
+            r#"
+name: parent
+version: "1.0"
+defaults:
+  model: {MODEL_ID}
+steps:
+  - id: research
+    type: workflow
+    file: child.yaml
+    inputs:
+      subject: "cats"
+    output: research
+  - id: summarize
+    type: prompt
+    output: summary
+    template: "Summarize: {{{{research.notes}}}}"
+outputs:
+  - name: summary
+    from: summarize
+"#
+        ),
+    )
+    .unwrap();
+
+    cmd()
+        .current_dir(s.dir.path())
+        .args([
+            "workflow",
+            "run",
+            parent_path.to_str().unwrap(),
+            "--config",
+            s.config.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // The parent's summarize request must carry the child's output, reached via
+    // `research.notes` — proof the child's outputs object flowed back typed.
+    let bodies = s.proxy.chat_request_bodies();
+    let last = serde_json::to_string(bodies.last().unwrap()).unwrap();
+    assert!(
+        last.contains("Summarize: FACTS-ABOUT-CATS"),
+        "parent should see the child output via field access: {last}"
+    );
+}
