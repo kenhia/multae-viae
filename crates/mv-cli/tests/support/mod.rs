@@ -300,19 +300,188 @@ pub struct KlamsChunk {
     pub source_path: String,
 }
 
-/// Custom wiremock responder implementing the MCP JSON-RPC subset.
+/// The single author id every `register_author` call returns. Real klams mints
+/// a fresh UUIDv7 per call; the fake uses one fixed id so tests can assert that
+/// every write carries it.
+pub const FAKE_AUTHOR_ID: &str = "00000000-0000-7000-8000-00000000a001";
+
+/// Mutable fake-klams state, shared between the responder and test accessors.
+/// Sprint 011 makes the fixture stateful so write→recall round-trips are
+/// provable across two CLI subprocesses talking to one fixture.
+#[derive(Default)]
+struct KlamsState {
+    /// `register_author` argument objects, in call order.
+    registrations: Vec<serde_json::Value>,
+    /// Stored knowledge/fact `PublicMemory` items (from `memory_add`).
+    knowledge: Vec<serde_json::Value>,
+    /// Stored event `PublicMemory` items (from `memory_append_event`).
+    events: Vec<serde_json::Value>,
+    /// The `author_id` seen on every write, in order (attribution assertions).
+    write_author_ids: Vec<String>,
+    /// When set, writes are rejected with this `(code, message)` envelope —
+    /// simulates e.g. the klams backup maintenance window.
+    reject_writes: Option<(String, String)>,
+}
+
+/// Custom wiremock responder implementing the MCP JSON-RPC subset plus the
+/// klams memory tools, backed by shared mutable state.
 struct McpResponder {
     session_id: String,
-    tools_list_result: serde_json::Value,
-    /// The text content block returned by a `tools/call` — a JSON-serialized
-    /// array of `PublicMemory` knowledge items.
-    search_result_text: String,
+    /// Seeded knowledge items (from `KlamsChunk`s), always returned by search.
+    seeded: Vec<serde_json::Value>,
+    state: std::sync::Arc<std::sync::Mutex<KlamsState>>,
+}
+
+impl McpResponder {
+    /// A successful `tools/call` result wrapping `text` as a single content
+    /// block — rig concatenates text content into the tool's return string.
+    fn ok(id: &serde_json::Value, text: String) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {"content": [{"type": "text", "text": text}], "isError": false},
+        }))
+    }
+
+    /// A tool error result (`isError: true`) — rig maps this to `Err`, with
+    /// `text` as the error message (so the code string reaches m-v's warning).
+    fn tool_err(id: &serde_json::Value, text: String) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {"content": [{"type": "text", "text": text}], "isError": true},
+        }))
+    }
+
+    fn handle_tool_call(
+        &self,
+        id: &serde_json::Value,
+        params: Option<&serde_json::Value>,
+    ) -> ResponseTemplate {
+        let name = params
+            .and_then(|p| p.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or("");
+        let args = params
+            .and_then(|p| p.get("arguments"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+
+        match name {
+            "register_author" => {
+                self.state.lock().unwrap().registrations.push(args);
+                Self::ok(
+                    id,
+                    serde_json::json!({
+                        "author_id": FAKE_AUTHOR_ID,
+                        "agent_name": "mv-cli",
+                        "created_at": "2026-06-12T00:00:00Z",
+                    })
+                    .to_string(),
+                )
+            }
+            "memory_add" => self.handle_write(id, &args, false),
+            "memory_append_event" => self.handle_write(id, &args, true),
+            "memory_search" => {
+                let st = self.state.lock().unwrap();
+                let mut items = self.seeded.clone();
+                items.extend(st.knowledge.iter().cloned());
+                Self::ok(id, serde_json::to_string(&items).unwrap())
+            }
+            "event_search" => {
+                let st = self.state.lock().unwrap();
+                let want = args.get("payload_match").and_then(|m| m.as_object());
+                let mut matched: Vec<serde_json::Value> = st
+                    .events
+                    .iter()
+                    .filter(|e| match want {
+                        None => true,
+                        Some(m) => {
+                            let payload = e.get("payload").and_then(|p| p.as_object());
+                            m.iter().all(|(k, v)| {
+                                payload
+                                    .and_then(|p| p.get(k))
+                                    .map(|pv| pv == v)
+                                    .unwrap_or(false)
+                            })
+                        }
+                    })
+                    .cloned()
+                    .collect();
+                // Default order is newest-first.
+                matched.reverse();
+                Self::ok(id, serde_json::json!({"events": matched}).to_string())
+            }
+            "memory_delete" => Self::ok(
+                id,
+                serde_json::json!({
+                    "id": args.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                    "deleted_at": "2026-06-12T00:00:00Z",
+                })
+                .to_string(),
+            ),
+            other => Self::tool_err(id, format!("unknown tool: {other}")),
+        }
+    }
+
+    /// Shared `memory_add` / `memory_append_event` handling: enforce a present,
+    /// known `author_id`, honor the reject switch, store the item, return it.
+    fn handle_write(
+        &self,
+        id: &serde_json::Value,
+        args: &serde_json::Value,
+        is_event: bool,
+    ) -> ResponseTemplate {
+        let author = args.get("author_id").and_then(|a| a.as_str()).unwrap_or("");
+        if author.is_empty() {
+            return Self::tool_err(id, "MISSING_AUTHOR_ID: author_id is required".to_string());
+        }
+        if author != FAKE_AUTHOR_ID {
+            return Self::tool_err(id, format!("UNKNOWN_AUTHOR_ID: {author}"));
+        }
+
+        let mut st = self.state.lock().unwrap();
+        if let Some((code, msg)) = st.reject_writes.clone() {
+            return Self::tool_err(id, format!("{code}: {msg}"));
+        }
+        st.write_author_ids.push(author.to_string());
+
+        let item = if is_event {
+            let idx = st.events.len();
+            let ev = serde_json::json!({
+                "id": format!("00000000-0000-7000-8000-{:012}", 1000 + idx),
+                "kind": "event",
+                "category": args.get("category").cloned().unwrap_or(serde_json::Value::Null),
+                "payload": args.get("payload").cloned().unwrap_or_else(|| serde_json::json!({})),
+                "tags": [],
+                "author": {"id": author, "agent_name": "mv-cli"},
+                "created_at": "2026-06-12T00:00:00Z",
+                "updated_at": "2026-06-12T00:00:00Z",
+            });
+            st.events.push(ev.clone());
+            ev
+        } else {
+            let idx = st.knowledge.len();
+            let item = serde_json::json!({
+                "id": format!("00000000-0000-7000-8000-{:012}", 2000 + idx),
+                "kind": "knowledge",
+                "text": args.get("text").cloned().unwrap_or(serde_json::Value::Null),
+                "tags": args.get("tags").cloned().unwrap_or_else(|| serde_json::json!([])),
+                "author": {"id": author, "agent_name": "mv-cli"},
+                "created_at": "2026-06-12T00:00:00Z",
+                "updated_at": "2026-06-12T00:00:00Z",
+            });
+            st.knowledge.push(item.clone());
+            item
+        };
+        Self::ok(id, item.to_string())
+    }
 }
 
 impl Respond for McpResponder {
     fn respond(&self, req: &Request) -> ResponseTemplate {
         let msg: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
-        let id = msg.get("id").cloned();
+        let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
         let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
         match method {
@@ -339,16 +508,9 @@ impl Respond for McpResponder {
             "tools/list" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,
-                "result": self.tools_list_result,
+                "result": memory_tools_list(),
             })),
-            "tools/call" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "content": [{"type": "text", "text": self.search_result_text}],
-                    "isError": false,
-                },
-            })),
+            "tools/call" => self.handle_tool_call(&id, msg.get("params")),
             "ping" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "jsonrpc": "2.0", "id": id, "result": {},
             })),
@@ -361,30 +523,25 @@ impl Respond for McpResponder {
     }
 }
 
-/// `tools/list` payload advertising the single `memory_search` tool, matching
-/// the klams arg schema (`query` required; `top_k`, `kinds`, `tags` optional).
-fn memory_search_tool_list() -> serde_json::Value {
+/// `tools/list` advertising the read + write memory tools m-v uses (contract
+/// v1.1). Schemas are minimal — rig only needs name + an object schema.
+fn memory_tools_list() -> serde_json::Value {
+    let obj = |required: &[&str]| serde_json::json!({"type": "object", "properties": {}, "required": required});
     serde_json::json!({
-        "tools": [{
-            "name": "memory_search",
-            "description": "Search the knowledge base (hybrid vector + full-text). \
-                            Returns ranked memory items.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "natural-language query"},
-                    "top_k": {"type": "integer", "description": "max results (1..50)"},
-                },
-                "required": ["query"],
-            },
-        }],
+        "tools": [
+            {"name": "memory_search", "description": "Search memory (hybrid).", "inputSchema": obj(&["query"])},
+            {"name": "register_author", "description": "Register an author.", "inputSchema": obj(&["agent_name"])},
+            {"name": "memory_add", "description": "Add a memory.", "inputSchema": obj(&["author_id"])},
+            {"name": "memory_append_event", "description": "Append an event.", "inputSchema": obj(&["author_id", "category", "payload"])},
+            {"name": "event_search", "description": "Search events.", "inputSchema": obj(&[])},
+            {"name": "memory_delete", "description": "Soft-delete a memory.", "inputSchema": obj(&["id"])},
+        ],
     })
 }
 
-/// Serialize seeded chunks as a JSON array of klams `PublicMemory` knowledge
-/// items — the wire shape m-v's contract pins.
-fn chunks_to_public_memory(chunks: &[KlamsChunk]) -> String {
-    let items: Vec<serde_json::Value> = chunks
+/// Seeded chunks as `PublicMemory` knowledge JSON values.
+fn chunks_to_items(chunks: &[KlamsChunk]) -> Vec<serde_json::Value> {
+    chunks
         .iter()
         .enumerate()
         .map(|(i, c)| {
@@ -399,14 +556,13 @@ fn chunks_to_public_memory(chunks: &[KlamsChunk]) -> String {
                 "updated_at": "2026-06-01T00:00:00Z",
             })
         })
-        .collect();
-    serde_json::to_string(&items).expect("serialize PublicMemory items")
+        .collect()
 }
 
-/// Public accessor for the serialized `PublicMemory` payload — lets tests
-/// measure realistic `memory_search` output size (FR-006 cap gate).
+/// Public accessor for the serialized seeded `PublicMemory` payload — lets
+/// tests measure realistic `memory_search` output size (FR-006 cap gate).
 pub fn public_memory_json(chunks: &[KlamsChunk]) -> String {
-    chunks_to_public_memory(chunks)
+    serde_json::to_string(&chunks_to_items(chunks)).expect("serialize PublicMemory items")
 }
 
 /// A running fake klams MCP server. Dropping it shuts down the server and its
@@ -414,6 +570,7 @@ pub fn public_memory_json(chunks: &[KlamsChunk]) -> String {
 pub struct FakeKlams {
     rt: tokio::runtime::Runtime,
     server: MockServer,
+    state: std::sync::Arc<std::sync::Mutex<KlamsState>>,
 }
 
 impl FakeKlams {
@@ -427,10 +584,11 @@ impl FakeKlams {
             .expect("build fixture runtime");
         let server = rt.block_on(MockServer::start());
 
+        let state = std::sync::Arc::new(std::sync::Mutex::new(KlamsState::default()));
         let responder = McpResponder {
             session_id: "klams-test-session".to_string(),
-            tools_list_result: memory_search_tool_list(),
-            search_result_text: chunks_to_public_memory(chunks),
+            seeded: chunks_to_items(chunks),
+            state: state.clone(),
         };
 
         // POST /mcp — guarded by the exact bearer header. A request without it
@@ -458,7 +616,7 @@ impl FakeKlams {
             ),
         );
 
-        Self { rt, server }
+        Self { rt, server, state }
     }
 
     /// The `url:` to put in an `mcp-servers.yaml` http entry.
@@ -471,6 +629,28 @@ impl FakeKlams {
         self.rt
             .block_on(self.server.received_requests())
             .unwrap_or_default()
+    }
+
+    /// `register_author` argument objects seen, in call order.
+    pub fn registrations(&self) -> Vec<serde_json::Value> {
+        self.state.lock().unwrap().registrations.clone()
+    }
+
+    /// The `author_id` carried by every write, in order — for attribution
+    /// assertions (all must equal [`FAKE_AUTHOR_ID`]).
+    pub fn write_author_ids(&self) -> Vec<String> {
+        self.state.lock().unwrap().write_author_ids.clone()
+    }
+
+    /// Count of stored events (turn records).
+    pub fn event_count(&self) -> usize {
+        self.state.lock().unwrap().events.len()
+    }
+
+    /// Make subsequent writes fail with this `(code, message)` envelope —
+    /// simulates the klams maintenance window / embedding-down paths.
+    pub fn reject_writes(&self, code: &str, message: &str) {
+        self.state.lock().unwrap().reject_writes = Some((code.to_string(), message.to_string()));
     }
 }
 

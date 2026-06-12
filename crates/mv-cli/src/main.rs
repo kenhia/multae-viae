@@ -5,6 +5,7 @@
 mod cli;
 mod commands;
 mod executors;
+mod memory;
 mod providers;
 mod telemetry;
 

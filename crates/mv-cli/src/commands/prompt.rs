@@ -84,10 +84,53 @@ pub async fn run_prompt(
         connect_mcp_servers(args.mcp_config.as_deref(), &agent_handle).await?
     };
 
+    // Begin a memory session if requested. Memory rides the same MCP tools, so
+    // it needs them attached; `--no-tools` disables it. Best-effort throughout:
+    // a failure here (no klams configured, server down) warns and proceeds with
+    // no memory rather than failing the prompt. Recall context is prepended to
+    // the prompt (the preamble is fixed at the provider call sites).
+    let mut session_mem = None;
+    let mut effective_prompt = prompt.to_string();
+    if let Some(session) = &args.session {
+        if args.no_tools {
+            eprintln!("note: --session ignored with --no-tools (memory needs MCP tools)");
+        } else {
+            let meta = mv_core::memory::SessionMeta {
+                agent_name: "mv-cli".to_string(),
+                session: session.clone(),
+                model: Some(entry.id.clone()),
+                client_app: "mv-cli".to_string(),
+                client_version: env!("CARGO_PKG_VERSION").to_string(),
+            };
+            match crate::memory::SessionMemory::begin(
+                crate::memory::KlamsMemory::new(agent_handle.clone()),
+                meta,
+            )
+            .await
+            {
+                Ok(sm) => {
+                    // The capability addendum is always present on a
+                    // memory-active run (so the model knows it can write);
+                    // recalled context is appended when there is any.
+                    let mut prefix = sm.preamble_addendum();
+                    if let Some(block) = sm.recall_block(prompt).await {
+                        prefix.push_str("\n\n");
+                        prefix.push_str(&block);
+                    }
+                    effective_prompt = format!("{prefix}\n\n{prompt}");
+                    session_mem = Some(sm);
+                }
+                Err(e) => {
+                    eprintln!("note: memory unavailable for session '{session}': {e}");
+                }
+            }
+        }
+    }
+
     // Streaming keeps single-model semantics — no mid-stream fallback (tokens
     // already shown can't be unshown), so it bypasses the chain walker.
     let result = if stream_trtllm_path {
-        stream_trtllm(entry, &endpoint, prompt, agent_handle)
+        stream_trtllm(entry, &endpoint, &effective_prompt, agent_handle)
             .await
             .map(|text| CompletionOutcome {
                 text,
@@ -98,12 +141,21 @@ pub async fn run_prompt(
             &registry,
             entry,
             &endpoint,
-            prompt,
+            &effective_prompt,
             agent_handle,
             &GenParams::default(),
         )
         .await
     };
+
+    // Record the turn BEFORE tearing down MCP — recording talks to klams over
+    // the same connections. Best-effort: a failure warns, never blocks. The
+    // original prompt is recorded, not the recall-augmented one.
+    if let (Some(sm), Ok(outcome)) = (&session_mem, &result)
+        && let Err(e) = sm.record(prompt, &outcome.text, &outcome.model_used).await
+    {
+        eprintln!("note: failed to record turn to memory: {e}");
+    }
 
     // Always shut down MCP connections, even on error
     mv_core::mcp::client::shutdown_all(mcp_connections).await;

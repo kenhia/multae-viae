@@ -68,6 +68,13 @@ pub struct PromptArgs {
     /// tokens with no tool access.
     #[arg(long)]
     pub no_tools: bool,
+
+    /// Memory session name. When set (and a klams MCP server is configured),
+    /// the run recalls prior turns of this session before answering and records
+    /// this turn after — so a later invocation with the same name remembers it.
+    /// Without it, no memory is read or written.
+    #[arg(long)]
+    pub session: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
