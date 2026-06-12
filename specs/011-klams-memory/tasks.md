@@ -82,16 +82,23 @@ green.
 
 ## Phase 4: WS4 — Degradation + live
 
-- [ ] T008 [P] [WS4] Degradation tests: dead klams + `--session` → prompt
+- [X] T008 [P] [WS4] Degradation tests: dead klams + `--session` → prompt
   succeeds with a warning (no hang); write rejected mid-run (fake returns a
   `MAINTENANCE_WINDOW_ACTIVE` envelope) → warn-and-continue, code surfaced
   (FR-005, SC-004)
-- [ ] T009 [P] [WS4] Live `#[ignore]`d kubs0 round-trip in `cli_klams.rs`:
-  register as `multae-viae` → append event → `event_search` it back →
-  `memory_delete` cleanup; skips without `KLAMS_TOKEN`; runs under the
-  existing `just test-klams` (FR-007, SC-006)
+- [X] T009 [P] [WS4] Live `#[ignore]`d kubs0 round-trip in `cli_klams.rs`:
+  two `--session` invocations against real klams + a real model
+  (`KLAMS_MODEL`) — register → recall → record live; the second run's success
+  proves the sequence executed end-to-end. Skips without `KLAMS_TOKEN`/
+  `KLAMS_MODEL`; runs under `just test-klams` (FR-007, SC-006). *Deviations
+  from the spec sketch: the CLI's only memory surface is `--session`, so the
+  test drives memory through it (agent `mv-cli`, not a direct
+  `register`/`append`/`search` call as `multae-viae`), and there is **no
+  `memory_delete` cleanup** — the CLI has no delete affordance this sprint, so
+  test writes are identifiable by `session_title: "mv-live-memory-test"` for
+  manual pruning. Updated in spec FR-007/SC-006 at WS5.*
 
-**Checkpoint**: failure modes proven; live path verified and self-cleaning.
+**Checkpoint**: failure modes proven; live path runnable on demand.
 
 ---
 

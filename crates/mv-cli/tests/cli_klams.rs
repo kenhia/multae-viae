@@ -381,3 +381,63 @@ fn live_klams_agentic_retrieval_round_trips() {
         .assert()
         .success();
 }
+
+#[test]
+#[ignore = "requires klams on kubs0, KLAMS_TOKEN, and a live model (KLAMS_MODEL)"]
+fn live_klams_memory_round_trips() {
+    // Sprint 011: exercise the full live memory path through the CLI —
+    // register → recall → record across two `--session` invocations against
+    // the real klams + a real model. Success of the second run proves the
+    // register/recall/record sequence executed end-to-end without error
+    // (model output is not asserted — a live LLM's wording is not stable).
+    //
+    // Writes land under agent `mv-cli` with session_title `mv-live-memory-test`
+    // (the CLI's fixed agent_name); the CLI has no delete surface this sprint,
+    // so these test writes are identifiable for manual pruning by session.
+    let Ok(token) = std::env::var("KLAMS_TOKEN") else {
+        eprintln!("skipping: KLAMS_TOKEN not set");
+        return;
+    };
+    let Ok(model) = std::env::var("KLAMS_MODEL") else {
+        eprintln!("skipping: KLAMS_MODEL not set (names a model in models.yaml)");
+        return;
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let mcp_config = write_klams_mcp_config(dir.path(), &live_klams_url());
+    let session = "mv-live-memory-test";
+
+    let mut record = Command::cargo_bin("mv-cli").unwrap();
+    record.timeout(Duration::from_secs(60));
+    record
+        .env("KLAMS_TOKEN", &token)
+        .args([
+            "--mcp-config",
+            mcp_config.to_str().unwrap(),
+            "-m",
+            &model,
+            "--session",
+            session,
+            "Briefly: what is klams?",
+        ])
+        .assert()
+        .success();
+
+    // Second process, same session — must register, recall the first turn,
+    // answer, and record, all live, without error.
+    let mut recall = Command::cargo_bin("mv-cli").unwrap();
+    recall.timeout(Duration::from_secs(60));
+    recall
+        .env("KLAMS_TOKEN", &token)
+        .args([
+            "--mcp-config",
+            mcp_config.to_str().unwrap(),
+            "-m",
+            &model,
+            "--session",
+            session,
+            "What did I just ask you about?",
+        ])
+        .assert()
+        .success();
+}

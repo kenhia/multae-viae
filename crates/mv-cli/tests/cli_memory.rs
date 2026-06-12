@@ -10,7 +10,7 @@ mod support;
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::time::Duration;
-use support::{FakeKlams, FakeProxy, write_trtllm_models_yaml};
+use support::{FakeKlams, FakeProxy, dead_mcp_url, write_trtllm_models_yaml};
 
 const MODEL_ID: &str = "fake-llama";
 const SERVED_NAME: &str = "fake-llama-served";
@@ -191,4 +191,50 @@ fn agent_can_write_memory_with_attribution() {
         authors.len() >= 2 && authors.iter().all(|a| a == support::FAKE_AUTHOR_ID),
         "agent write + turn record both attributed: {authors:?}"
     );
+}
+
+// --- WS4 (T008): memory never blocks a prompt ---
+
+#[test]
+fn dead_klams_with_session_still_answers() {
+    let proxy = FakeProxy::start();
+    proxy.mount_health_ok();
+    proxy.mount_chat_text("answered despite no memory");
+
+    let dir = tempfile::tempdir().unwrap();
+    let models = write_trtllm_models_yaml(dir.path(), MODEL_ID, SERVED_NAME, &proxy.endpoint());
+    let mcp_config = write_klams_mcp_config(dir.path(), &dead_mcp_url());
+
+    run(dir.path(), &models, &mcp_config, Some("research"), "hello")
+        .success()
+        .stdout(predicate::str::contains("answered despite no memory"))
+        // The session could not be registered (klams dead); a warning says so and
+        // the run proceeds.
+        .stderr(predicate::str::contains(
+            "memory unavailable for session 'research'",
+        ));
+}
+
+#[test]
+fn rejected_write_warns_with_code_and_still_answers() {
+    let proxy = FakeProxy::start();
+    proxy.mount_health_ok();
+    proxy.mount_chat_text("here is your answer");
+
+    // klams is up (registration + recall work) but writes are rejected — e.g.
+    // the daily backup maintenance window.
+    let klams = FakeKlams::start(TOKEN, &[]);
+    klams.reject_writes("MAINTENANCE_WINDOW_ACTIVE", "backups in progress");
+
+    let dir = tempfile::tempdir().unwrap();
+    let models = write_trtllm_models_yaml(dir.path(), MODEL_ID, SERVED_NAME, &proxy.endpoint());
+    let mcp_config = write_klams_mcp_config(dir.path(), &klams.mcp_url());
+
+    run(dir.path(), &models, &mcp_config, Some("research"), "hello")
+        .success()
+        .stdout(predicate::str::contains("here is your answer"))
+        // The turn-record write is rejected; the warning carries klams's code.
+        .stderr(predicate::str::contains("MAINTENANCE_WINDOW_ACTIVE"));
+
+    assert_eq!(klams.event_count(), 0, "the rejected write stored nothing");
 }
