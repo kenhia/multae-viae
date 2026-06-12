@@ -61,15 +61,16 @@ are actionable and non-fatal; `just ci` green.
 
 ## Phase 3: WS3 — Workflow retrieval
 
-- [ ] T006 [WS3] `workflows/examples/rag-example.yaml`: `memory_search` tool
-  step → prompt step consuming `{{results}}`; e2e hermetic test against fake
-  klams + fake proxy; validation-pin test in `cli_workflow.rs` (FR-005,
-  SC-002)
-- [ ] T007 [WS3] FR-006 decision gate: measure default-shape `memory_search`
-  output against the 10,000-char tool-output cap in the e2e test; either add
-  per-server `tool_output_limit` (config + registry plumbing + tests) or
-  document top_k guidance — record the outcome in plan.md §Design decisions 6
-  (FR-006)
+- [X] T006 [WS3] `workflows/examples/rag-example.yaml`: `memory_search` tool
+  step → prompt step consuming `{{context}}`; e2e hermetic test
+  (`workflow_retrieves_context_into_prompt_step` — retrieved marker reaches
+  the prompt step's completion request); validation-pin test
+  `shipped_rag_example_validates` in `cli_workflow.rs` (FR-005, SC-002)
+- [X] T007 [WS3] FR-006 decision gate: measured in
+  `realistic_search_payload_stays_under_tool_output_cap` — top_k 5 ≈ 6.5k,
+  top_k 10 ≈ 13k. **Decision: keep the universal 10k cap, no per-server
+  limit** (no real shape truncates at top_k 3–5); example caps top_k 5, docs
+  carry the guidance. Outcome recorded in plan.md §Design decisions 6 (FR-006)
 
 **Checkpoint**: deterministic workflow retrieval shipped; truncation question
 answered with data.

@@ -1,0 +1,48 @@
+name: rag-example
+version: "1.0"
+description: >
+  Retrieval-augmented answering. Pull relevant context from the klams memory
+  service via the `memory_search` MCP tool, then answer the question grounded
+  in what came back. Requires a klams MCP server configured in
+  mcp-servers.yaml (see docs/08-rag-integration.md); `memory_search` merges
+  into the tool set like any MCP tool.
+
+defaults:
+  model: qwen3:8b
+
+inputs:
+  - name: question
+    type: string
+    required: true
+    description: The question to answer from retrieved context
+
+steps:
+  - id: retrieve
+    name: Retrieve context from klams
+    type: tool
+    tool: memory_search
+    inputs:
+      query: "{{question}}"
+      # Keep top_k small: each result is a chunk, and the merged text feeds a
+      # prompt. 3–5 keeps the rendered context well under the tool-output cap
+      # (see docs/08 — the cap is a universal 10k-char guard, not per-server).
+      top_k: 5
+    output: context
+
+  - id: answer
+    name: Answer grounded in retrieved context
+    type: prompt
+    output: answer
+    template: |
+      Answer the question using only the retrieved context below. If the
+      context does not contain the answer, say that plainly rather than
+      guessing.
+
+      Retrieved context:
+      {{context}}
+
+      Question: {{question}}
+
+outputs:
+  - name: answer
+    from: answer

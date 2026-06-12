@@ -115,3 +115,104 @@ fn agent_retrieves_seeded_content_from_klams() {
     });
     assert!(saw_bearer, "klams must have received the bearer token");
 }
+
+fn write_rag_workflow(dir: &std::path::Path) -> std::path::PathBuf {
+    let path = dir.join("rag.yaml");
+    // A tool step retrieves via memory_search; the prompt step consumes the
+    // rendered {{context}}. Mirrors workflows/examples/rag-example.yaml but
+    // pinned to the fake model id.
+    let yaml = format!(
+        r#"
+name: rag-test
+version: "1.0"
+inputs:
+  - name: question
+    type: string
+    required: true
+steps:
+  - id: retrieve
+    type: tool
+    tool: memory_search
+    inputs:
+      query: "{{{{question}}}}"
+      top_k: 5
+    output: context
+  - id: answer
+    type: prompt
+    model: {MODEL_ID}
+    output: answer
+    template: |
+      Context: {{{{context}}}}
+      Question: {{{{question}}}}
+outputs:
+  - name: answer
+    from: answer
+"#
+    );
+    std::fs::write(&path, yaml).expect("write rag workflow");
+    path
+}
+
+#[test]
+fn workflow_retrieves_context_into_prompt_step() {
+    let proxy = FakeProxy::start();
+    proxy.mount_health_ok();
+    // The prompt step makes a single completion; its rendered template must
+    // already contain the retrieved context.
+    proxy.mount_chat_text("ANSWER: grounded in retrieved context.");
+
+    let klams = FakeKlams::start(TOKEN, &[seeded_chunk()]);
+
+    let dir = tempfile::tempdir().unwrap();
+    let models = write_trtllm_models_yaml(dir.path(), MODEL_ID, SERVED_NAME, &proxy.endpoint());
+    let mcp_config = write_klams_mcp_config(dir.path(), &klams.mcp_url());
+    let wf = write_rag_workflow(dir.path());
+
+    cmd()
+        .current_dir(dir.path())
+        .env("KLAMS_TOKEN", TOKEN)
+        .args([
+            "workflow",
+            "run",
+            wf.to_str().unwrap(),
+            "--config",
+            models.to_str().unwrap(),
+            "--mcp-config",
+            mcp_config.to_str().unwrap(),
+            "--input",
+            "question=What is the capital of Fakeland?",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "ANSWER: grounded in retrieved context.",
+        ));
+
+    // The prompt step's rendered template (sent to the model) must carry the
+    // retrieved marker — proof the tool step's output flowed into {{context}}.
+    let bodies = proxy.chat_request_bodies();
+    assert_eq!(bodies.len(), 1, "the workflow makes exactly one completion");
+    let body = serde_json::to_string(&bodies[0]).unwrap();
+    assert!(
+        body.contains(MARKER),
+        "retrieved context must reach the prompt step: {body}"
+    );
+}
+
+/// FR-006 decision gate: measure a realistic `memory_search` payload against
+/// the 10,000-char tool-output cap. With top_k 5 × ~800-char chunks the
+/// serialized result must stay well under the cap — otherwise the prompt step
+/// would receive silently-truncated context. Documents the decision in code:
+/// the universal cap stands; the example caps top_k at 5.
+#[test]
+fn realistic_search_payload_stays_under_tool_output_cap() {
+    // Five scanner-sized chunks, the example's top_k.
+    let chunks: Vec<KlamsChunk> = (0..5).map(|_| seeded_chunk()).collect();
+    let serialized = support::public_memory_json(&chunks);
+    assert!(
+        serialized.len() < 10_000,
+        "top_k=5 payload was {} chars — exceeds the 10k tool-output cap; \
+         FR-006 would require a per-server tool_output_limit",
+        serialized.len()
+    );
+}

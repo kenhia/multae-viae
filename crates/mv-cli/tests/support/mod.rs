@@ -403,6 +403,12 @@ fn chunks_to_public_memory(chunks: &[KlamsChunk]) -> String {
     serde_json::to_string(&items).expect("serialize PublicMemory items")
 }
 
+/// Public accessor for the serialized `PublicMemory` payload — lets tests
+/// measure realistic `memory_search` output size (FR-006 cap gate).
+pub fn public_memory_json(chunks: &[KlamsChunk]) -> String {
+    chunks_to_public_memory(chunks)
+}
+
 /// A running fake klams MCP server. Dropping it shuts down the server and its
 /// runtime.
 pub struct FakeKlams {

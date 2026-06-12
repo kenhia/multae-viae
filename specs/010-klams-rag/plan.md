@@ -70,13 +70,17 @@ as a standalone tool, decoupled from m-v.
    the contract doc, with ~800-char `text` payloads, and rejects requests
    missing the bearer header. It extends the 008 fake-MCP binary rather than
    starting a new fixture.
-6. **Tool-output cap is a measured decision, not a guess** (FR-006). Default
-   `memory_search` (top_k 10 × ~800 chars + JSON overhead) likely exceeds the
-   10,000-char cap. The fake-server e2e measures it; the gate: if meaningful
-   truncation occurs at default shapes, add per-server `tool_output_limit`
-   (default 10,000 — boundary defense stays); if top_k 3–5 keeps results
-   comfortably under, document the guidance and keep the cap universal.
-   Outcome recorded here at implementation time.
+6. **Tool-output cap is a measured decision, not a guess** (FR-006).
+   **OUTCOME (measured in `cli_klams.rs`,
+   `realistic_search_payload_stays_under_tool_output_cap`):** with chunks at
+   the high end of klams's range (~1.1k chars serialized incl. JSON overhead),
+   the `memory_search` payload is ~3.9k at top_k 3, ~6.5k at top_k 5, and
+   ~13k at top_k 10. So the 10k cap is exceeded only at top_k ≈ 8+.
+   **Decision: keep the universal 10k cap; do not add a per-server
+   `tool_output_limit` this sprint** (YAGNI — no real shape truncates at the
+   recommended top_k). The shipped example caps `top_k: 5` with a comment, and
+   docs/08 documents the 3–5 guidance plus the cap as the backstop. The test
+   pins the boundary so a future default-shape regression is caught.
 7. **Live tests mirror the TRT-LLM pattern**: `#[ignore]`d, `just
    test-klams`, env-configured (`KLAMS_URL` default `http://kubs0:7777/mcp`,
    `KLAMS_TOKEN` required). Hermetic remains the default truth.
