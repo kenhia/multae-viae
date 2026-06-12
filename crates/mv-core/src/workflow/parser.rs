@@ -233,6 +233,36 @@ steps:
     }
 
     #[test]
+    fn parse_loop_step() {
+        let yaml = r#"
+name: loop-test
+version: "1.0"
+steps:
+  - id: refine
+    type: loop
+    max_iterations: 3
+    exit_condition: "draft == 'good'"
+    steps:
+      - id: improve
+        type: prompt
+        output: draft
+        template: "Improve {{draft}}"
+"#;
+        let wf = load_from_str(yaml, "test.yaml").unwrap();
+        match &wf.steps[0] {
+            Step::Loop(l) => {
+                assert_eq!(l.id, "refine");
+                assert_eq!(l.max_iterations, 3);
+                assert_eq!(l.exit_condition.as_deref(), Some("draft == 'good'"));
+                assert_eq!(l.steps.len(), 1);
+            }
+            other => panic!("expected Loop, got {other:?}"),
+        }
+        // A loop is a control step with no single output.
+        assert_eq!(wf.steps[0].output(), None);
+    }
+
+    #[test]
     fn parse_parallel_step() {
         let yaml = r#"
 name: parallel-test

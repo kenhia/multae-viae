@@ -64,15 +64,15 @@ shipped examples pinned by validate tests.
 
 ## Phase 3: WS3 — `loop` step
 
-- [ ] T008 [WS3] `Step::Loop { id, name?, max_iterations, exit_condition?,
+- [X] T008 [WS3] `Step::Loop { id, name?, max_iterations, exit_condition?,
   steps }` in `workflow/types.rs` + parser (`deny_unknown_fields`,
   `Step::output()` → `None`); parse/shape tests (FR-008)
-- [ ] T009 [WS3] Validation: `max_iterations >= 1`; non-empty body;
+- [X] T009 [WS3] Validation: `max_iterations >= 1`; non-empty body;
   condition compiles + references resolve (body outputs visible — condition
   runs post-iteration); recursive id/output/maybe-defined/reference walks
   extend into the body; post-loop definitely-defined = body's; tests incl.
   nested loop-in-branch (FR-008)
-- [ ] T010 [WS3] Engine: do-while over the shared context via
+- [X] T010 [WS3] Engine: do-while over the shared context via
   `execute_steps` recursion; cap reached = normal continuation;
   per-iteration tracing span with index; mock-executor tests (early exit
   after exactly N body runs; cap-bound run; condition references body

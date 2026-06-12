@@ -52,6 +52,12 @@ pub enum ValidationError {
     EmptyParallel {
         step_id: String,
     },
+    EmptyLoop {
+        step_id: String,
+    },
+    InvalidLoopMaxIterations {
+        step_id: String,
+    },
     EmptyPreferList {
         step_id: String,
     },
@@ -125,6 +131,12 @@ impl std::fmt::Display for ValidationError {
             }
             Self::EmptyParallel { step_id } => {
                 write!(f, "parallel step '{step_id}' has no child steps")
+            }
+            Self::EmptyLoop { step_id } => {
+                write!(f, "loop step '{step_id}' has no body steps")
+            }
+            Self::InvalidLoopMaxIterations { step_id } => {
+                write!(f, "loop step '{step_id}' must have max_iterations >= 1")
             }
             Self::EmptyPreferList { step_id } => {
                 write!(
@@ -244,6 +256,7 @@ fn collect_step_ids<'a>(steps: &'a [Step], out: &mut Vec<&'a str>) {
                 collect_step_ids(&bs.otherwise, out);
             }
             Step::Parallel(par) => collect_step_ids(&par.steps, out),
+            Step::Loop(ls) => collect_step_ids(&ls.steps, out),
             _ => {}
         }
     }
@@ -434,6 +447,54 @@ fn validate_steps(
                 // All children run, so every produced output is definitely
                 // available after the join.
                 for name in produced {
+                    available.insert(name.clone());
+                    defined_here.insert(name);
+                }
+            }
+            Step::Loop(ls) => {
+                if ls.max_iterations == 0 {
+                    errors.push(ValidationError::InvalidLoopMaxIterations {
+                        step_id: ls.id.clone(),
+                    });
+                }
+                if ls.steps.is_empty() {
+                    errors.push(ValidationError::EmptyLoop {
+                        step_id: ls.id.clone(),
+                    });
+                }
+
+                // The body validates against the pre-loop context. It runs at
+                // least once, so its definitely-defined set propagates after
+                // the loop (unlike a branch, there is no other arm to intersect
+                // with).
+                let body_def =
+                    validate_steps(&ls.steps, &available, input_names, workflow_dir, errors);
+
+                // The exit condition is evaluated AFTER each iteration, so it
+                // may reference the body's outputs as well as the outer scope.
+                if let Some(cond) = &ls.exit_condition {
+                    match template::condition_references(cond) {
+                        Ok(refs) => {
+                            for var in refs {
+                                if !available.contains(&var)
+                                    && !input_names.contains(&var)
+                                    && !body_def.contains(&var)
+                                {
+                                    errors.push(ValidationError::UnresolvableReference {
+                                        step_id: ls.id.clone(),
+                                        reference: var,
+                                    });
+                                }
+                            }
+                        }
+                        Err(details) => errors.push(ValidationError::ConditionSyntax {
+                            step_id: ls.id.clone(),
+                            details,
+                        }),
+                    }
+                }
+
+                for name in body_def {
                     available.insert(name.clone());
                     defined_here.insert(name);
                 }
@@ -1377,6 +1438,90 @@ steps:
             ),
             "got: {errors:?}"
         );
+    }
+
+    #[test]
+    fn loop_zero_iterations_and_empty_body_rejected() {
+        let yaml = r#"
+name: test
+version: "1.0"
+steps:
+  - id: spin
+    type: loop
+    max_iterations: 0
+    steps: []
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let errors = validate(&wf, None);
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::InvalidLoopMaxIterations { step_id } if step_id == "spin"
+            )),
+            "got: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::EmptyLoop { step_id } if step_id == "spin")),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn loop_exit_condition_may_reference_body_output() {
+        // The condition runs after each iteration, so referencing the body's
+        // own output `draft` must validate (it is defined by the time the
+        // condition is evaluated).
+        let yaml = r#"
+name: test
+version: "1.0"
+steps:
+  - id: refine
+    type: loop
+    max_iterations: 3
+    exit_condition: "draft == 'good'"
+    steps:
+      - id: improve
+        type: prompt
+        output: draft
+        template: "improve"
+outputs:
+  - name: result
+    from: improve
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let errors = validate(&wf, None);
+        assert!(errors.is_empty(), "expected clean, got: {errors:?}");
+    }
+
+    #[test]
+    fn loop_body_output_is_available_after_the_loop() {
+        // A loop runs at least once, so its body's outputs are definitely
+        // defined afterwards (unlike a one-armed branch).
+        let yaml = r#"
+name: test
+version: "1.0"
+steps:
+  - id: refine
+    type: loop
+    max_iterations: 2
+    steps:
+      - id: improve
+        type: prompt
+        output: draft
+        template: "improve"
+  - id: use
+    type: prompt
+    output: final
+    template: "use {{draft}}"
+outputs:
+  - name: result
+    from: use
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let errors = validate(&wf, None);
+        assert!(errors.is_empty(), "expected clean, got: {errors:?}");
     }
 
     #[test]

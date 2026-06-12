@@ -625,3 +625,69 @@ steps:
         "else-arm must not run (numeric 10 >= 8 is true): {arm_req}"
     );
 }
+
+// --- 012/WS3: loop step exits early on a typed body-output condition ---
+
+#[test]
+fn loop_exits_when_body_score_meets_condition() {
+    // Both prompts get the same canned JSON (score 9). Iteration 1: draft +
+    // critique → score 9 → `review.score >= 8` true → exit. So exactly 2 chat
+    // completions, not 6 (which a run-to-cap of 3 would produce).
+    let s = setup();
+    s.proxy.mount_health_ok();
+    s.proxy.mount_chat_text("{\"score\": 9}");
+
+    let wf_path = s.dir.path().join("loop.yaml");
+    std::fs::write(
+        &wf_path,
+        format!(
+            r#"
+name: loop-e2e
+version: "1.0"
+defaults:
+  model: {MODEL_ID}
+steps:
+  - id: refine
+    type: loop
+    max_iterations: 3
+    exit_condition: "review.score >= 8"
+    steps:
+      - id: draft
+        type: prompt
+        output: draft
+        template: "Write about cats"
+      - id: critique
+        type: prompt
+        output: review_raw
+        template: "Score: {{{{draft}}}}"
+      - id: score
+        type: transform
+        operation: extract_json
+        input: "{{{{review_raw}}}}"
+        output: review
+outputs:
+  - name: result
+    from: draft
+"#
+        ),
+    )
+    .unwrap();
+
+    cmd()
+        .current_dir(s.dir.path())
+        .args([
+            "workflow",
+            "run",
+            wf_path.to_str().unwrap(),
+            "--config",
+            s.config.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let chats = s.proxy.chat_request_bodies().len();
+    assert_eq!(
+        chats, 2,
+        "loop should exit after one iteration (2 prompts), got {chats}"
+    );
+}

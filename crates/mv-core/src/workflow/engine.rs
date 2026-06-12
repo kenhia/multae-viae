@@ -412,6 +412,43 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
                 }
             }
         }
+        Step::Loop(ls) => {
+            // Do-while over the shared context: the body runs, then the exit
+            // condition (if any) is evaluated against the full context, so it
+            // can read what the iteration just produced. Reaching
+            // `max_iterations` is normal termination, not an error.
+            let mut iterations: u32 = 0;
+            loop {
+                iterations += 1;
+                debug!(step_id = %ls.id, iteration = iterations, "loop iteration");
+                Box::pin(execute_steps(
+                    &ls.steps,
+                    ctx,
+                    defaults,
+                    prompt_executor,
+                    tool_executor,
+                    workflow_dir,
+                ))
+                .await?;
+
+                if let Some(cond) = &ls.exit_condition {
+                    let vars = ctx.to_template_context();
+                    let done = template::evaluate_condition(cond, &vars).map_err(|e| {
+                        MvError::WorkflowTemplateError {
+                            step: ls.id.clone(),
+                            details: e,
+                        }
+                    })?;
+                    if done {
+                        break;
+                    }
+                }
+                if iterations >= ls.max_iterations {
+                    break;
+                }
+            }
+            debug!(step_id = %ls.id, iterations, "loop completed");
+        }
     }
     Ok(())
 }
@@ -455,6 +492,7 @@ fn step_type_name(step: &Step) -> &'static str {
         Step::Transform(_) => "transform",
         Step::Branch(_) => "branch",
         Step::Parallel(_) => "parallel",
+        Step::Loop(_) => "loop",
     }
 }
 
@@ -1738,5 +1776,88 @@ steps:
         .unwrap();
 
         assert_eq!(result.outputs["result"], "processed");
+    }
+
+    // --- 012/WS3: loop step ---
+
+    #[tokio::test]
+    async fn loop_exits_early_on_condition() {
+        let yaml = r#"
+name: refine
+version: "1.0"
+steps:
+  - id: spin
+    type: loop
+    max_iterations: 5
+    exit_condition: "draft == 'stop'"
+    steps:
+      - id: improve
+        type: prompt
+        output: draft
+        template: "improve"
+outputs:
+  - name: result
+    from: improve
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        // Iteration 2 produces "stop" → the loop exits; the 3rd response is
+        // never consumed.
+        let prompt_exec = MockPromptExecutor::new(vec!["go", "stop", "NEVER"]);
+        let tool_exec = MockToolExecutor::always_ok("");
+
+        let result = execute_workflow(
+            &wf,
+            HashMap::new(),
+            &prompt_exec,
+            &tool_exec,
+            Path::new("."),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(prompt_exec.call_count(), 2, "body should run exactly twice");
+        assert_eq!(result.outputs["result"], "stop");
+    }
+
+    #[tokio::test]
+    async fn loop_without_condition_runs_to_cap() {
+        let yaml = r#"
+name: spin
+version: "1.0"
+steps:
+  - id: spin
+    type: loop
+    max_iterations: 3
+    steps:
+      - id: tick
+        type: prompt
+        output: t
+        template: "tick"
+outputs:
+  - name: result
+    from: tick
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let prompt_exec = MockPromptExecutor::new(vec!["a", "b", "c"]);
+        let tool_exec = MockToolExecutor::always_ok("");
+
+        let result = execute_workflow(
+            &wf,
+            HashMap::new(),
+            &prompt_exec,
+            &tool_exec,
+            Path::new("."),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            prompt_exec.call_count(),
+            3,
+            "no condition → runs to the cap"
+        );
+        assert_eq!(result.outputs["result"], "c");
     }
 }

@@ -130,6 +130,21 @@ fn shipped_rag_example_validates() {
         .stdout(predicate::str::contains("valid"));
 }
 
+// --- 012/WS3: the shipped loop example must validate ---
+
+#[test]
+fn shipped_loop_example_validates() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../workflows/examples/loop-example.yaml"
+    );
+    cmd()
+        .args(["workflow", "validate", path])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("valid"));
+}
+
 // --- 009/WS3: the shipped branch example must validate ---
 
 #[test]
