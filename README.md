@@ -152,22 +152,25 @@ outputs:
     from: summarize
 ```
 
-Workflows support five step types: `prompt` (LLM calls), `tool`, `transform`,
-and — since sprint 009 — `branch` and `parallel`. Tool steps execute real
-tools — the same merged built-in + MCP tool set the agent sees — with
-skip/fail/retry error handling (retry re-attempts transient errors only, and
-re-runs side effects). `transform` currently supports a single operation,
-`extract_json`. Template variables use `{{var}}` syntax (minijinja) with step
-outputs shadowing workflow inputs.
+Workflows support seven step types: `prompt` (LLM calls), `tool`, `transform`,
+`branch` and `parallel` (sprint 009), and — since sprint 012 — `loop` and
+`workflow` (nested). Tool steps execute real tools — the same merged built-in +
+MCP tool set the agent sees — with skip/fail/retry error handling (retry
+re-attempts transient errors only, and re-runs side effects). `transform`
+currently supports a single operation, `extract_json`. Template variables use
+`{{var}}` syntax (minijinja); the execution context is **typed** (sprint 012),
+so templates do field access (`{{report.title}}`) and conditions compare
+numerically (`score >= 8`), with step outputs shadowing workflow inputs.
 
-`branch` runs one of two nested step lists based on a condition (a minijinja
-expression like `style == 'detailed'`); `parallel` runs its child steps
-concurrently, each against a snapshot of the context, merging their disjoint
-outputs at the join. See
-[`workflows/examples/branch-example.yaml`](workflows/examples/branch-example.yaml)
-and [`parallel-example.yaml`](workflows/examples/parallel-example.yaml), and
-[docs/06](docs/06-dsl-flow-management.md) for the semantics (including the
-maybe-defined-output rule for branches).
+`branch` runs one of two nested step lists based on a condition; `parallel`
+runs its children concurrently against a context snapshot, merging disjoint
+outputs at the join; `loop` runs its body do-while up to `max_iterations`,
+stopping on a typed `exit_condition`; `workflow` runs another workflow file as
+a step (isolated inputs, child outputs returned as one object, cycle/depth
+guarded). See the examples in
+[`workflows/examples/`](workflows/examples/) and
+[docs/06](docs/06-dsl-flow-management.md) for the full semantics (maybe-defined
+outputs, typed values, loop and nesting rules).
 
 A prompt step's `model:` may be a single id or a preference list
 (`model: { prefer: [qwen3:8b, gpt-4o-mini] }`); the first reachable model

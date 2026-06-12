@@ -322,11 +322,19 @@ fn live_model() -> Option<String> {
 fn run_live_model(cmd: &mut Command, what: &str) -> Option<String> {
     let out = cmd.output().expect("spawn mv-cli");
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    if !out.status.success() && stderr.contains("Cannot reach model backend") {
+    // No usable model backend = skip (not a klams regression). Either the
+    // backend is unreachable, or it is reachable but the chosen model fails
+    // server-side (a 5xx — e.g. Ollama's `llama runner process has terminated`,
+    // which sprint 012 made report truthfully as `returned HTTP 5xx` instead of
+    // the old "Cannot reach" misclassification).
+    let no_usable_backend =
+        stderr.contains("Cannot reach model backend") || stderr.contains("returned HTTP 5");
+    if !out.status.success() && no_usable_backend {
         eprintln!(
-            "SKIP {what}: no model backend reachable. These live tests drive a real \
+            "SKIP {what}: no usable model backend. These live tests drive a real \
              model (m-v calls out to Ollama/TRT-LLM/cloud — it does not serve one). \
-             Start the backend, or set KLAMS_MODEL to a model your machine can reach."
+             Start the backend, or set KLAMS_MODEL to a model your machine can reach \
+             and load."
         );
         return None;
     }

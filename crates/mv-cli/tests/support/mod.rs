@@ -145,6 +145,21 @@ impl FakeProxy {
         );
     }
 
+    /// `POST /v1/chat/completions` → 500 with an error `body`. The backend was
+    /// reached and failed: rig surfaces `HttpError(InvalidStatusCodeWithMessage(
+    /// 500, body))`, which must classify to `BackendErrorResponse` (truthful,
+    /// fallback-eligible) — NOT `BackendUnreachable`.
+    pub fn mount_chat_500(&self, body: &str) {
+        self.mount(
+            Mock::given(method("POST"))
+                .and(path("/v1/chat/completions"))
+                .respond_with(
+                    ResponseTemplate::new(500)
+                        .set_body_raw(body.to_string().into_bytes(), "application/json"),
+                ),
+        );
+    }
+
     /// `POST /v1/chat/completions` → 200 with an empty `choices` array. The
     /// HTTP call succeeds, so this is not an `HttpError`; rig fails to extract a
     /// message and the error classifies to `CompletionFailed` — NOT

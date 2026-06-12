@@ -293,7 +293,12 @@ directory: `specs/009-routing-composition/`.
   `BackendUnreachable` (fallback-*eligible*). Triggering a genuinely
   *ineligible* error hermetically meant a 200-with-no-`choices` body, not a 5xx
   — a reminder that the proxy contract is informal and the wiremock fixture is
-  the only place it's pinned.
+  the only place it's pinned. **(Fixed in sprint 012:** a *reached* backend
+  that answers 5xx is now `BackendErrorResponse` — truthful message, still
+  fallback-eligible — instead of the misleading "Is the server running?";
+  `HttpError` no longer implies unreachable. The misclassification surfaced in
+  practice via `just run` against a model whose Ollama runner crashed — see
+  `specs/supplemental-spec.md`.**)
 - The recursive `Step` shape was the real cost of branch+parallel: `output()`
   became `Option`, and every walk (engine, validator, id/output collection,
   `outputs` mapping) had to recurse. Doing `branch` first (WS3) and letting
@@ -430,11 +435,41 @@ The `String → serde_json::Value` context migration (decided in 008; the most
 breaking change on the roadmap, landed before `mv-server` multiplies
 consumers), then the step types that need it.
 
-- [ ] `Value` context migration (typed conditions, structured tool results)
-- [ ] `loop` step (max_iterations, typed exit_condition)
-- [ ] Nested `workflow` step (cross-file cycle detection, depth cap)
+- [x] `Value` context migration (typed conditions, structured tool results)
+- [x] `loop` step (max_iterations, typed exit_condition)
+- [x] Nested `workflow` step (cross-file cycle detection, depth cap)
+- [x] Pulled-in fix: truthful backend-error classification (5xx ≠ unreachable)
 
 **Deliverable**: workflows iterate, compose, and carry structured data.
+
+### Phase 6.2 Lessons Learned
+
+- The `String → Value` migration was far smaller than its "most breaking
+  change on the roadmap" billing — exactly because minijinja already ingests
+  any `Serialize` context. The type flip touched three files; the engine,
+  validator (which reasons about *names*, not values), and executor traits
+  (kept `String`-based at the boundary) were largely untouched. Deciding the
+  migration in 008 and keeping one template language is what made it a type
+  change rather than a rewrite.
+- The back-compat gate worked as designed: the entire pre-012 suite passed
+  with a *single* mechanical change (a workflow output now pretty-prints).
+  That one diff was the signal that nothing deeper shifted.
+- `loop` surfaced a genuine boundary: a body step referencing its own
+  previous-iteration output collides with the linear maybe-defined validator
+  (self-reference = circular). Rather than half-build cross-iteration
+  analysis, v1 scoped the body to linear validation and documented the
+  limitation — a useful "retry until good" loop ships now; refinement is a
+  named future step.
+- Nested `workflow` reused `execute_workflow` as its own sub-call contract
+  (the fable prediction held). Threading a canonical-path chain caught cycles
+  one level deeper than the root without needing the root's own path; the
+  validator bounds its cross-file descent by passing `dir=None` to the child,
+  so a cyclic pair can't loop the validator.
+- The pulled-in misclassification fix was the highest value-per-line: the bug
+  was a bare `"HttpError"` substring match (rig stamps it on *status
+  responses* too, not just transport failures). Matching the typed status and
+  splitting 5xx (eligible, truthful) from 4xx (fail fast) made the error
+  honest without changing fallback behavior for real transport failures.
 
 ### Phase 6.3: mv-server (sprint 013)
 

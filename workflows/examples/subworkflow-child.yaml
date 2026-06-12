@@ -1,0 +1,23 @@
+name: subworkflow-child
+version: "1.0"
+description: >
+  Child of subworkflow-example.yaml — gathers notes on a subject. Runnable on
+  its own, too: a nested workflow is just a workflow.
+
+defaults:
+  model: qwen3-coder:30b
+
+inputs:
+  - name: subject
+    type: string
+    required: true
+
+steps:
+  - id: gather
+    type: prompt
+    output: notes
+    template: "List three key facts about {{subject}}."
+
+outputs:
+  - name: notes
+    from: gather

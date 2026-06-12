@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use serde_json::Value;
 use tracing::{debug, info};
 
 use super::retry::execute_tool_with_error_handling;
@@ -46,31 +47,38 @@ pub trait ToolExecutor: Send + Sync {
 /// callers — go through the accessors.
 #[derive(Debug, Clone)]
 pub struct ExecutionContext {
-    inputs: HashMap<String, String>,
-    outputs: HashMap<String, String>,
+    inputs: HashMap<String, Value>,
+    outputs: HashMap<String, Value>,
 }
 
 impl ExecutionContext {
+    /// Build a context from CLI/workflow inputs. Inputs arrive as strings (the
+    /// `--input KEY=VALUE` boundary) and are stored as `Value::String`;
+    /// structure enters the context later, via `extract_json` and nested
+    /// workflow outputs.
     pub fn new(inputs: HashMap<String, String>) -> Self {
         Self {
-            inputs,
+            inputs: inputs
+                .into_iter()
+                .map(|(k, v)| (k, Value::String(v)))
+                .collect(),
             outputs: HashMap::new(),
         }
     }
 
-    /// Record a step output. Outputs shadow inputs of the same name in
-    /// subsequent template contexts.
-    pub fn insert_output(&mut self, name: impl Into<String>, value: String) {
+    /// Record a step output as a typed value. Outputs shadow inputs of the same
+    /// name in subsequent template contexts.
+    pub fn insert_output(&mut self, name: impl Into<String>, value: Value) {
         self.outputs.insert(name.into(), value);
     }
 
     /// Look up a recorded step output.
-    pub fn output(&self, name: &str) -> Option<&str> {
-        self.outputs.get(name).map(String::as_str)
+    pub fn output(&self, name: &str) -> Option<&Value> {
+        self.outputs.get(name)
     }
 
     /// Build a template variable map: outputs shadow inputs.
-    pub fn to_template_context(&self) -> HashMap<String, String> {
+    pub fn to_template_context(&self) -> HashMap<String, Value> {
         let mut vars = self.inputs.clone();
         vars.extend(self.outputs.clone());
         vars
@@ -84,7 +92,7 @@ impl ExecutionContext {
 
     /// Outputs present here but not in `base` — the new outputs a parallel
     /// child produced on top of its fork snapshot, for merging at the join.
-    pub fn outputs_added_since(&self, base: &ExecutionContext) -> Vec<(String, String)> {
+    pub fn outputs_added_since(&self, base: &ExecutionContext) -> Vec<(String, Value)> {
         self.outputs
             .iter()
             .filter(|(name, _)| !base.outputs.contains_key(*name))
@@ -93,10 +101,11 @@ impl ExecutionContext {
     }
 }
 
-/// Result of executing a workflow.
+/// Result of executing a workflow. Output values are typed; a front end prints
+/// strings raw and everything else as JSON (see `commands/workflow.rs`).
 #[derive(Debug)]
 pub struct WorkflowResult {
-    pub outputs: HashMap<String, String>,
+    pub outputs: HashMap<String, Value>,
 }
 
 /// Defaults applied to prompt steps that don't override them.
@@ -163,6 +172,33 @@ pub async fn execute_workflow<P: PromptExecutor, T: ToolExecutor>(
     workflow_dir: &Path,
     default_model: &str,
 ) -> Result<WorkflowResult, MvError> {
+    execute_workflow_inner(
+        workflow,
+        inputs,
+        prompt_executor,
+        tool_executor,
+        workflow_dir,
+        default_model,
+        &[],
+    )
+    .await
+}
+
+/// Maximum nesting depth for `workflow` steps (a child running a child …).
+const MAX_WORKFLOW_DEPTH: usize = 8;
+
+/// The real workflow body, threading `chain` — the canonical paths of nested
+/// workflows currently executing — so a `workflow` step can reject a cycle or
+/// over-deep nesting before re-entering. The top-level call passes `&[]`.
+async fn execute_workflow_inner<P: PromptExecutor, T: ToolExecutor>(
+    workflow: &Workflow,
+    inputs: HashMap<String, String>,
+    prompt_executor: &P,
+    tool_executor: &T,
+    workflow_dir: &Path,
+    default_model: &str,
+    chain: &[std::path::PathBuf],
+) -> Result<WorkflowResult, MvError> {
     // Validate inputs
     let resolved_inputs = validate_inputs(workflow, inputs)?;
     let mut ctx = ExecutionContext::new(resolved_inputs);
@@ -185,6 +221,8 @@ pub async fn execute_workflow<P: PromptExecutor, T: ToolExecutor>(
         prompt_executor,
         tool_executor,
         workflow_dir,
+        default_model,
+        chain,
     )
     .await?;
 
@@ -197,6 +235,7 @@ pub async fn execute_workflow<P: PromptExecutor, T: ToolExecutor>(
 
 /// Run a step list against a mutable context. Recurses into nested step lists
 /// (the `branch` arms) via `Box::pin` for the async recursion.
+#[allow(clippy::too_many_arguments)]
 async fn execute_steps<P: PromptExecutor, T: ToolExecutor>(
     steps: &[Step],
     ctx: &mut ExecutionContext,
@@ -204,6 +243,8 @@ async fn execute_steps<P: PromptExecutor, T: ToolExecutor>(
     prompt_executor: &P,
     tool_executor: &T,
     workflow_dir: &Path,
+    default_model: &str,
+    chain: &[std::path::PathBuf],
 ) -> Result<(), MvError> {
     for step in steps {
         let step_span = tracing::info_span!(
@@ -224,6 +265,8 @@ async fn execute_steps<P: PromptExecutor, T: ToolExecutor>(
             prompt_executor,
             tool_executor,
             workflow_dir,
+            default_model,
+            chain,
         )
         .await?;
 
@@ -233,7 +276,10 @@ async fn execute_steps<P: PromptExecutor, T: ToolExecutor>(
         let output_len = step
             .output()
             .and_then(|name| ctx.output(name))
-            .map_or(0, str::len);
+            // A string value's own length; otherwise its JSON length.
+            .map_or(0, |v| {
+                v.as_str().map_or_else(|| v.to_string().len(), str::len)
+            });
         info!(
             step_id = %step.id(),
             output_name,
@@ -248,6 +294,7 @@ async fn execute_steps<P: PromptExecutor, T: ToolExecutor>(
 /// Execute a single step, recording any leaf output into the context. Control
 /// steps (`branch`) mutate the context by recursing into the chosen arm rather
 /// than producing a single output.
+#[allow(clippy::too_many_arguments)]
 async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
     step: &Step,
     ctx: &mut ExecutionContext,
@@ -255,6 +302,8 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
     prompt_executor: &P,
     tool_executor: &T,
     workflow_dir: &Path,
+    default_model: &str,
+    chain: &[std::path::PathBuf],
 ) -> Result<(), MvError> {
     match step {
         Step::Prompt(ps) => {
@@ -300,7 +349,8 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
                     step: ps.id.clone(),
                     source: Box::new(e),
                 })?;
-            ctx.insert_output(&ps.output, output);
+            // Model output is text; structure enters via `extract_json`.
+            ctx.insert_output(&ps.output, Value::String(output));
         }
         Step::Tool(ts) => {
             // Render tool inputs from context — every string leaf, including
@@ -313,7 +363,8 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
 
             let output =
                 execute_tool_with_error_handling(ts, &rendered_inputs, tool_executor).await?;
-            ctx.insert_output(&ts.output, output);
+            // Tool output is text (truncated upstream); structure via transform.
+            ctx.insert_output(&ts.output, Value::String(output));
         }
         Step::Transform(ts) => {
             let vars = ctx.to_template_context();
@@ -347,6 +398,8 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
                 prompt_executor,
                 tool_executor,
                 workflow_dir,
+                default_model,
+                chain,
             ))
             .await?;
         }
@@ -364,6 +417,8 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
                         prompt_executor,
                         tool_executor,
                         workflow_dir,
+                        default_model,
+                        chain,
                     ))
                     .await
                     .map(|()| child_ctx)
@@ -398,6 +453,123 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
                 }
             }
         }
+        Step::Loop(ls) => {
+            // Do-while over the shared context: the body runs, then the exit
+            // condition (if any) is evaluated against the full context, so it
+            // can read what the iteration just produced. Reaching
+            // `max_iterations` is normal termination, not an error.
+            let mut iterations: u32 = 0;
+            loop {
+                iterations += 1;
+                debug!(step_id = %ls.id, iteration = iterations, "loop iteration");
+                Box::pin(execute_steps(
+                    &ls.steps,
+                    ctx,
+                    defaults,
+                    prompt_executor,
+                    tool_executor,
+                    workflow_dir,
+                    default_model,
+                    chain,
+                ))
+                .await?;
+
+                if let Some(cond) = &ls.exit_condition {
+                    let vars = ctx.to_template_context();
+                    let done = template::evaluate_condition(cond, &vars).map_err(|e| {
+                        MvError::WorkflowTemplateError {
+                            step: ls.id.clone(),
+                            details: e,
+                        }
+                    })?;
+                    if done {
+                        break;
+                    }
+                }
+                if iterations >= ls.max_iterations {
+                    break;
+                }
+            }
+            debug!(step_id = %ls.id, iterations, "loop completed");
+        }
+        Step::SubWorkflow(sw) => {
+            // Resolve the child file relative to the parent's directory.
+            let child_path = workflow_dir.join(&sw.file);
+            let canonical =
+                child_path
+                    .canonicalize()
+                    .map_err(|_| MvError::WorkflowFileNotFound {
+                        path: child_path.display().to_string(),
+                    })?;
+
+            // Cycle: re-entering a workflow already running in this chain.
+            if chain.contains(&canonical) {
+                let mut rendered: Vec<String> =
+                    chain.iter().map(|p| p.display().to_string()).collect();
+                rendered.push(canonical.display().to_string());
+                return Err(MvError::WorkflowCycle {
+                    chain: rendered.join(" -> "),
+                });
+            }
+            // Depth: bound runaway nesting (chain length is the current depth).
+            if chain.len() + 1 > MAX_WORKFLOW_DEPTH {
+                return Err(MvError::WorkflowDepthExceeded {
+                    max: MAX_WORKFLOW_DEPTH,
+                });
+            }
+
+            // Load + validate the child (runtime re-validation, mirroring the
+            // template_file precedent).
+            let child_wf = super::parser::load_from_file(&canonical).map_err(|e| {
+                MvError::WorkflowStepError {
+                    step: sw.id.clone(),
+                    source: Box::new(e),
+                }
+            })?;
+            // Owned child dir so it outlives moving `canonical` into the chain.
+            let child_dir = canonical
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("."), Path::to_path_buf);
+            let verrs = super::validate::validate(&child_wf, Some(&child_dir));
+            if let Some(first) = verrs.first() {
+                return Err(MvError::WorkflowStepFailed {
+                    step: sw.id.clone(),
+                    details: format!("nested workflow '{}' is invalid: {first}", sw.file),
+                });
+            }
+
+            // Render the templated inputs against the parent context; the child
+            // sees ONLY these (no parent-context leakage).
+            let vars = ctx.to_template_context();
+            let mut child_inputs: HashMap<String, String> = HashMap::new();
+            for (key, tmpl) in &sw.inputs {
+                let rendered = template::render_template(tmpl, &vars).map_err(|e| {
+                    MvError::WorkflowTemplateError {
+                        step: sw.id.clone(),
+                        details: e.to_string(),
+                    }
+                })?;
+                child_inputs.insert(key.clone(), rendered);
+            }
+
+            let mut new_chain = chain.to_vec();
+            new_chain.push(canonical);
+            let child_result = Box::pin(execute_workflow_inner(
+                &child_wf,
+                child_inputs,
+                prompt_executor,
+                tool_executor,
+                &child_dir,
+                default_model,
+                &new_chain,
+            ))
+            .await?;
+
+            // The child's declared outputs become one object stored at `output`,
+            // so a later step can reach into them (`{{sub.answer}}`).
+            let obj: serde_json::Map<String, Value> = child_result.outputs.into_iter().collect();
+            ctx.insert_output(&sw.output, Value::Object(obj));
+        }
     }
     Ok(())
 }
@@ -407,7 +579,7 @@ async fn execute_step<P: PromptExecutor, T: ToolExecutor>(
 /// interpolates instead of passing the literal braces to the tool.
 fn render_json_value(
     val: &serde_json::Value,
-    vars: &HashMap<String, String>,
+    vars: &HashMap<String, Value>,
     step_id: &str,
 ) -> Result<serde_json::Value, MvError> {
     Ok(match val {
@@ -441,10 +613,12 @@ fn step_type_name(step: &Step) -> &'static str {
         Step::Transform(_) => "transform",
         Step::Branch(_) => "branch",
         Step::Parallel(_) => "parallel",
+        Step::Loop(_) => "loop",
+        Step::SubWorkflow(_) => "workflow",
     }
 }
 
-fn build_workflow_outputs(workflow: &Workflow, ctx: &ExecutionContext) -> HashMap<String, String> {
+fn build_workflow_outputs(workflow: &Workflow, ctx: &ExecutionContext) -> HashMap<String, Value> {
     if workflow.outputs.is_empty() {
         // When no outputs specified, return the last step's output (if it is a
         // leaf step that produced one — a trailing branch has no single output).
@@ -452,7 +626,7 @@ fn build_workflow_outputs(workflow: &Workflow, ctx: &ExecutionContext) -> HashMa
         if let Some(output_name) = workflow.steps.last().and_then(|s| s.output())
             && let Some(value) = ctx.output(output_name)
         {
-            map.insert(output_name.to_string(), value.to_string());
+            map.insert(output_name.to_string(), value.clone());
         }
         map
     } else {
@@ -466,7 +640,7 @@ fn build_workflow_outputs(workflow: &Workflow, ctx: &ExecutionContext) -> HashMa
                 let step = super::types::find_step(&workflow.steps, &wo.from)?;
                 let output_name = step.output()?;
                 ctx.output(output_name)
-                    .map(|v| (wo.name.clone(), v.to_string()))
+                    .map(|v| (wo.name.clone(), v.clone()))
             })
             .collect()
     }
@@ -577,7 +751,10 @@ mod tests {
                 .into_iter()
                 .collect(),
         );
-        ctx.insert_output("topic".to_string(), "output_value".to_string());
+        ctx.insert_output(
+            "topic".to_string(),
+            Value::String("output_value".to_string()),
+        );
         let vars = ctx.to_template_context();
         assert_eq!(vars["topic"], "output_value");
     }
@@ -589,7 +766,10 @@ mod tests {
                 .into_iter()
                 .collect(),
         );
-        ctx.insert_output("output_key".to_string(), "output_val".to_string());
+        ctx.insert_output(
+            "output_key".to_string(),
+            Value::String("output_val".to_string()),
+        );
         let vars = ctx.to_template_context();
         assert_eq!(vars["input_key"], "input_val");
         assert_eq!(vars["output_key"], "output_val");
@@ -1632,8 +1812,7 @@ steps:
     #[test]
     fn extract_json_valid() {
         let input = r#"{"title": "Rust Guide", "sections": 5}"#;
-        let result = execute_transform("test", "extract_json", input, None).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let parsed = execute_transform("test", "extract_json", input, None).unwrap();
         assert_eq!(parsed["title"], "Rust Guide");
         assert_eq!(parsed["sections"], 5);
     }
@@ -1647,8 +1826,7 @@ steps:
 ```
 
 That's it."#;
-        let result = execute_transform("test", "extract_json", input, None).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let parsed = execute_transform("test", "extract_json", input, None).unwrap();
         assert_eq!(parsed["key"], "value");
     }
 
@@ -1662,8 +1840,7 @@ That's it."#;
     fn extract_json_schema_pass() {
         let schema = serde_json::json!({"title": "", "count": 0});
         let input = r#"{"title": "Hello", "count": 42, "extra": true}"#;
-        let result = execute_transform("test", "extract_json", input, Some(&schema)).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let parsed = execute_transform("test", "extract_json", input, Some(&schema)).unwrap();
         assert_eq!(parsed["title"], "Hello");
     }
 
@@ -1721,5 +1898,227 @@ steps:
         .unwrap();
 
         assert_eq!(result.outputs["result"], "processed");
+    }
+
+    // --- 012/WS3: loop step ---
+
+    #[tokio::test]
+    async fn loop_exits_early_on_condition() {
+        let yaml = r#"
+name: refine
+version: "1.0"
+steps:
+  - id: spin
+    type: loop
+    max_iterations: 5
+    exit_condition: "draft == 'stop'"
+    steps:
+      - id: improve
+        type: prompt
+        output: draft
+        template: "improve"
+outputs:
+  - name: result
+    from: improve
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        // Iteration 2 produces "stop" → the loop exits; the 3rd response is
+        // never consumed.
+        let prompt_exec = MockPromptExecutor::new(vec!["go", "stop", "NEVER"]);
+        let tool_exec = MockToolExecutor::always_ok("");
+
+        let result = execute_workflow(
+            &wf,
+            HashMap::new(),
+            &prompt_exec,
+            &tool_exec,
+            Path::new("."),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(prompt_exec.call_count(), 2, "body should run exactly twice");
+        assert_eq!(result.outputs["result"], "stop");
+    }
+
+    #[tokio::test]
+    async fn loop_without_condition_runs_to_cap() {
+        let yaml = r#"
+name: spin
+version: "1.0"
+steps:
+  - id: spin
+    type: loop
+    max_iterations: 3
+    steps:
+      - id: tick
+        type: prompt
+        output: t
+        template: "tick"
+outputs:
+  - name: result
+    from: tick
+"#;
+        let wf = parser::load_from_str(yaml, "test.yaml").unwrap();
+        let prompt_exec = MockPromptExecutor::new(vec!["a", "b", "c"]);
+        let tool_exec = MockToolExecutor::always_ok("");
+
+        let result = execute_workflow(
+            &wf,
+            HashMap::new(),
+            &prompt_exec,
+            &tool_exec,
+            Path::new("."),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            prompt_exec.call_count(),
+            3,
+            "no condition → runs to the cap"
+        );
+        assert_eq!(result.outputs["result"], "c");
+    }
+
+    // --- 012/WS4: nested workflow step ---
+
+    #[tokio::test]
+    async fn subworkflow_runs_child_and_exposes_its_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("child.yaml"),
+            r#"
+name: child
+version: "1.0"
+inputs:
+  - name: topic
+    type: string
+    required: true
+steps:
+  - id: answer
+    type: prompt
+    output: answer
+    template: "About {{topic}}"
+outputs:
+  - name: answer
+    from: answer
+"#,
+        )
+        .unwrap();
+        let parent_yaml = r#"
+name: parent
+version: "1.0"
+steps:
+  - id: sub
+    type: workflow
+    file: child.yaml
+    inputs:
+      topic: "rust"
+    output: child
+  - id: use
+    type: prompt
+    output: final
+    template: "Child said: {{child.answer}}"
+outputs:
+  - name: result
+    from: use
+"#;
+        let wf = parser::load_from_str(parent_yaml, "parent.yaml").unwrap();
+        // First response = child's `answer` step; second = parent's `use` step.
+        let prompt_exec = MockPromptExecutor::new(vec!["CHILD_ANSWER", "PARENT_DONE"]);
+        let tool_exec = MockToolExecutor::always_ok("");
+
+        let result = execute_workflow(
+            &wf,
+            HashMap::new(),
+            &prompt_exec,
+            &tool_exec,
+            dir.path(),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap();
+
+        // The parent's prompt rendered the child's output via field access.
+        let calls = prompt_exec.calls();
+        assert_eq!(calls[1].0, "Child said: CHILD_ANSWER");
+        assert_eq!(result.outputs["result"], "PARENT_DONE");
+    }
+
+    #[tokio::test]
+    async fn subworkflow_cycle_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        // a.yaml → b.yaml → a.yaml
+        std::fs::write(
+            dir.path().join("a.yaml"),
+            "name: a\nversion: \"1.0\"\nsteps:\n  - id: s\n    type: workflow\n    \
+             file: b.yaml\n    output: o\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("b.yaml"),
+            "name: b\nversion: \"1.0\"\nsteps:\n  - id: s\n    type: workflow\n    \
+             file: a.yaml\n    output: o\n",
+        )
+        .unwrap();
+        let wf = parser::load_from_file(&dir.path().join("a.yaml")).unwrap();
+        let prompt_exec = MockPromptExecutor::new(vec![]);
+        let tool_exec = MockToolExecutor::always_ok("");
+
+        let err = execute_workflow(
+            &wf,
+            HashMap::new(),
+            &prompt_exec,
+            &tool_exec,
+            dir.path(),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, MvError::WorkflowCycle { .. }), "got: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn subworkflow_depth_is_bounded() {
+        // A chain n0 → n1 → … longer than MAX_WORKFLOW_DEPTH, all distinct
+        // files (no cycle), must fail with the depth error.
+        let dir = tempfile::tempdir().unwrap();
+        let n = MAX_WORKFLOW_DEPTH + 2;
+        for i in 0..n {
+            let body = if i + 1 < n {
+                format!(
+                    "name: n{i}\nversion: \"1.0\"\nsteps:\n  - id: s\n    type: workflow\n    \
+                     file: n{}.yaml\n    output: o\n",
+                    i + 1
+                )
+            } else {
+                format!(
+                    "name: n{i}\nversion: \"1.0\"\nsteps:\n  - id: s\n    type: prompt\n    \
+                     output: o\n    template: \"done\"\n"
+                )
+            };
+            std::fs::write(dir.path().join(format!("n{i}.yaml")), body).unwrap();
+        }
+        let wf = parser::load_from_file(&dir.path().join("n0.yaml")).unwrap();
+        let prompt_exec = MockPromptExecutor::new(vec!["x"; n]);
+        let tool_exec = MockToolExecutor::always_ok("");
+
+        let err = execute_workflow(
+            &wf,
+            HashMap::new(),
+            &prompt_exec,
+            &tool_exec,
+            dir.path(),
+            "qwen3:4b",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, MvError::WorkflowDepthExceeded { .. }),
+            "got: {err:?}"
+        );
     }
 }

@@ -1,0 +1,39 @@
+name: subworkflow-example
+version: "1.0"
+description: >
+  Composition (sprint 012). A parent workflow runs another workflow file as a
+  single `workflow` step, passing templated inputs and receiving the child's
+  declared outputs as one object — so a later step reaches into them
+  (`{{research.notes}}`). The child (subworkflow-child.yaml) sees only the
+  inputs it is given; cross-file cycles and over-deep nesting are rejected.
+
+defaults:
+  model: qwen3-coder:30b
+
+inputs:
+  - name: topic
+    type: string
+    required: true
+    description: What to research and summarize
+
+steps:
+  - id: research
+    name: Run the research sub-workflow
+    type: workflow
+    file: subworkflow-child.yaml
+    inputs:
+      subject: "{{topic}}"
+    output: research
+
+  - id: summarize
+    name: Summarize the child's findings
+    type: prompt
+    output: summary
+    template: |
+      Summarize these notes into a single sentence:
+
+      {{research.notes}}
+
+outputs:
+  - name: summary
+    from: summarize

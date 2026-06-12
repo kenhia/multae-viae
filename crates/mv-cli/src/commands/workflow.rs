@@ -76,7 +76,9 @@ pub async fn run_workflow(args: &WorkflowRunArgs, json: bool) -> Result<(), mv_c
 
     let result = result?;
 
-    // Print outputs
+    // Print outputs. Values are typed (sprint 012): in `--json` they serialize
+    // naturally; in text mode a string prints raw (no quotes — back-compat),
+    // and any other value prints as pretty JSON.
     if json {
         let obj = serde_json::json!({
             "workflow": workflow.name,
@@ -86,7 +88,13 @@ pub async fn run_workflow(args: &WorkflowRunArgs, json: bool) -> Result<(), mv_c
     } else {
         for (name, value) in &result.outputs {
             println!("## {name}\n");
-            println!("{value}\n");
+            match value {
+                serde_json::Value::String(s) => println!("{s}\n"),
+                other => println!(
+                    "{}\n",
+                    serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string())
+                ),
+            }
         }
     }
 

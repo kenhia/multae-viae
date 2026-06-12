@@ -9,10 +9,10 @@ models:
 
   - id: qwen3:8b
     provider: ollama
-    default: true
 
   - id: qwen3-coder:30b
     provider: ollama
+    default: true
 
   # Cloud provider example (uncomment and set OPENAI_API_KEY env var)
   # - id: gpt-4o-mini

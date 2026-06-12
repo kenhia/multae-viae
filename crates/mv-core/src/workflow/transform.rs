@@ -7,13 +7,15 @@ use crate::MvError;
 /// All transform operations the engine implements.
 pub const KNOWN_TRANSFORMS: &[&str] = &["extract_json"];
 
-/// Execute a transform step.
+/// Execute a transform step, returning the structured result. As of sprint
+/// 012 the result is a typed [`serde_json::Value`] (no re-stringify), so a
+/// later step can reach into its fields (`{{out.title}}`, `out.score >= 8`).
 pub fn execute_transform(
     step_id: &str,
     operation: &str,
     input: &str,
     schema: Option<&serde_json::Value>,
-) -> Result<String, MvError> {
+) -> Result<serde_json::Value, MvError> {
     match operation {
         "extract_json" => extract_json(step_id, input, schema),
         other => Err(MvError::WorkflowStepFailed {
@@ -28,7 +30,7 @@ fn extract_json(
     step_id: &str,
     input: &str,
     schema: Option<&serde_json::Value>,
-) -> Result<String, MvError> {
+) -> Result<serde_json::Value, MvError> {
     // Try to extract JSON from markdown code fences first
     let json_str = if let Some(start) = input.find("```json") {
         let content_start = start + 7;
@@ -68,7 +70,7 @@ fn extract_json(
         })?;
     }
 
-    Ok(parsed.to_string())
+    Ok(parsed)
 }
 
 /// Simple structural comparison: check that the parsed JSON has the same

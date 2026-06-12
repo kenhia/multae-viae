@@ -1,0 +1,52 @@
+name: loop-example
+version: "1.0"
+description: >
+  Retry-until-good (sprint 012). The loop body drafts, self-scores, and the
+  exit condition reads the body's own score each iteration (do-while), so the
+  loop stops as soon as the score is high enough — or after max_iterations.
+  `extract_json` makes `review.score` a real number, so the condition is a
+  numeric comparison.
+
+  Note (v1 scope): a loop body validates like any linear sequence — a step may
+  reference outputs defined *earlier in the body*, but not its own output or a
+  later step's. So this example re-drafts from scratch each iteration rather
+  than editing the prior draft; cross-iteration refinement (a step reading its
+  own previous output) is a documented future extension.
+
+defaults:
+  model: qwen3-coder:30b
+
+inputs:
+  - name: topic
+    type: string
+    required: true
+    description: What to draft
+
+steps:
+  - id: refine
+    name: Draft until the score is high enough
+    type: loop
+    max_iterations: 3
+    exit_condition: "review.score >= 8"
+    steps:
+      - id: draft
+        type: prompt
+        output: draft
+        template: "Write a short, vivid paragraph about {{topic}}."
+      - id: critique
+        type: prompt
+        output: review_raw
+        template: |
+          Score the following draft from 1 to 10 for vividness.
+          Return only JSON of the form {"score": N}.
+
+          {{draft}}
+      - id: score
+        type: transform
+        operation: extract_json
+        input: "{{review_raw}}"
+        output: review
+
+outputs:
+  - name: final_draft
+    from: draft

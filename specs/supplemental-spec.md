@@ -15,4 +15,38 @@ updated.
 
 | Date | Change | Rationale | Commit |
 |------|--------|-----------|--------|
-| _(none yet)_ | | | |
+| 2026-06-12 | `default-run = "mv-cli"` in `crates/mv-cli/Cargo.toml` | The `fake_mcp_server` test fixture (added sprint 008) is a second bin target, making `cargo run -p mv-cli` / `just run` ambiguous. Pin the real CLI as the default-run target. | `3e39a3b` |
+| 2026-06-12 | `models.yaml` default model `qwen3:8b` → `qwen3-coder:30b` | While verifying `just run`, `qwen3:8b`'s Ollama runner crashed on this host (`llama runner process has terminated`); `qwen3-coder:30b` runs cleanly. Repoint the registry default so the no-`-m` path works out of the box. (Host-specific model choice — adjust as needed.) | shipped in the sprint 012 PR |
+
+## Resolved in sprint 012
+
+- **Backend-error misclassification** (below) — fixed in sprint 012 WS1 as
+  `MvError::BackendErrorResponse` (truthful, fallback-eligible; the bare
+  `"HttpError"` substring no longer implies unreachable). See
+  `specs/012-dsl-completion/`.
+
+- **Backend-error misclassification.** A model backend that *responds* with an
+  HTTP error status is reported as `BackendUnreachable` ("Is Ollama running?")
+  — misleading, because the backend was reached. Captured while diagnosing the
+  `just run` failure above: rig surfaced
+  `CompletionError(HttpError(InvalidStatusCodeWithMessage(500, "…llama runner
+  process has terminated…")))`, and `classify_backend_error`
+  (`crates/mv-core/src/providers.rs`) matched the bare `"HttpError"` substring
+  → `BackendUnreachable`. A status-bearing response is **not** a transport
+  failure; only connection-refused / timeout / "error sending request" should
+  be `BackendUnreachable`. Fix in 012: distinguish a status-code response
+  (route to `CompletionFailed`, or a new status-bearing variant, surfacing the
+  real status + body) from a genuine transport failure; decide its
+  fallback-eligibility deliberately (a crashed per-model runner is arguably a
+  reasonable reason to fall back). Touches the shared classifier + its tests +
+  the fallback taxonomy, so it is sprint work, not an ad-hoc patch.
+
+## Branch rollup note (closed)
+
+The `default-run` + `models.yaml`-default commits originated on the
+**`fix-default-run`** branch and were **not** shipped via their own PR. As
+planned, **`012-dsl-completion`** branched off `fix-default-run` (carrying
+those commits forward), fixed the misclassification, and shipped everything in
+one sprint-012 PR. On merge, both local branches (`fix-default-run` and
+`012-dsl-completion`) are deleted; the squash-merge on `main` is the single
+record (the `3e39a3b` ref above was the pre-squash branch commit).

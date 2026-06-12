@@ -130,6 +130,38 @@ fn shipped_rag_example_validates() {
         .stdout(predicate::str::contains("valid"));
 }
 
+// --- 012/WS3: the shipped loop example must validate ---
+
+#[test]
+fn shipped_loop_example_validates() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../workflows/examples/loop-example.yaml"
+    );
+    cmd()
+        .args(["workflow", "validate", path])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("valid"));
+}
+
+// --- 012/WS4: the shipped nested-workflow example must validate ---
+
+#[test]
+fn shipped_subworkflow_example_validates() {
+    // Validation loads and checks the child file too (the directory is known),
+    // so a broken child would fail this.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../workflows/examples/subworkflow-example.yaml"
+    );
+    cmd()
+        .args(["workflow", "validate", path])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("valid"));
+}
+
 // --- 009/WS3: the shipped branch example must validate ---
 
 #[test]
