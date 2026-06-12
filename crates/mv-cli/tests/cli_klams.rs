@@ -298,10 +298,17 @@ fn live_klams_url() -> String {
     std::env::var("KLAMS_URL").unwrap_or_else(|_| "http://kubs0:7777/mcp".to_string())
 }
 
-/// The model these model-driven live tests should drive. `KLAMS_MODEL` overrides
-/// it; otherwise the CLI's built-in default (an Ollama model) is used. m-v is a
-/// controller — it *calls* this backend, it does not serve it — so the backend
-/// (Ollama / TRT-LLM / cloud) must be reachable for these tests to run.
+/// The repo's real `models.yaml` (absolute), so live tests resolve against the
+/// project's actual registry — not the built-in fallback that only knows
+/// `qwen3:4b`. This is why `KLAMS_MODEL` must name a model defined there.
+fn live_models_config() -> String {
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../models.yaml").to_string()
+}
+
+/// Which registered model to drive. `KLAMS_MODEL` overrides; otherwise the
+/// registry's `default:` model is used (no `-m`). m-v is a controller — it
+/// *calls* this backend (Ollama / TRT-LLM / cloud), it does not serve one — so
+/// the backend must be reachable with the model loaded for these tests to run.
 fn live_model() -> Option<String> {
     std::env::var("KLAMS_MODEL").ok()
 }
@@ -380,9 +387,9 @@ outputs:
         .success();
 }
 
-/// Build a live model-driven `mv-cli` invocation: bearer token in env, klams
-/// MCP config, optional `-m <KLAMS_MODEL>` (else the CLI's default model), then
-/// `extra` args + the prompt.
+/// Build a live model-driven `mv-cli` invocation: bearer token in env, the
+/// repo's real model registry (`--config`), the klams MCP config, optional
+/// `-m <KLAMS_MODEL>` (else the registry default), then `extra` args + prompt.
 fn live_model_cmd(
     token: &str,
     mcp_config: &std::path::Path,
@@ -393,6 +400,8 @@ fn live_model_cmd(
     c.timeout(Duration::from_secs(60));
     c.env("KLAMS_TOKEN", token);
     let mut args: Vec<String> = vec![
+        "--config".into(),
+        live_models_config(),
         "--mcp-config".into(),
         mcp_config.to_string_lossy().into_owned(),
     ];

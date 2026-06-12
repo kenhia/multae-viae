@@ -43,8 +43,9 @@ test-trtllm:
 # the endpoint. The workflow-retrieval test is model-free — it is the pure
 # "is klams reachable / auth / retrieval working" check. The agentic and memory
 # tests drive the full prompt path, so they need a reachable MODEL BACKEND
-# (m-v calls out to Ollama/TRT-LLM/cloud — it does not serve a model);
-# KLAMS_MODEL picks which registered model to drive (else the CLI default).
+# (m-v calls out to Ollama/TRT-LLM/cloud — it does not serve a model). They use
+# the repo's ./models.yaml; KLAMS_MODEL picks which model in it to drive (must
+# be defined there — e.g. qwen3-coder:30b), else the registry default (qwen3:8b).
 # Those two SKIP (not fail) if no backend is reachable. Hermetic suite (just ci)
 # stays green without any of this.
 test-klams:
