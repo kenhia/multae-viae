@@ -309,21 +309,32 @@ directory: `specs/009-routing-composition/`.
 
 ## Phase 5.5: RAG Integration (Weeks 20-22)
 
-**Goal**: Retrieval-augmented generation — vector store, embedding pipeline,
-ingestion, and retrieval wired into agent workflows.
+**Goal**: Retrieval-augmented context wired into agent workflows, served by
+**klams** (Ken's Local Agent Memory System) on kubs0 over MCP.
 
-Split out of Phase 5 (see above). See [08-rag-integration.md](08-rag-integration.md)
-for the design research.
+Split out of Phase 5 (see above). Amended 2026-06-12: the original task list
+(build a Qdrant store, an embedding pipeline, and a RAG MCP server) is
+superseded — klams already provides all three, deployed: an rmcp Streamable
+HTTP MCP server with scoped bearer auth, hybrid vector+FTS retrieval, and
+scanner + push ingestion. A krag-backed alternative was evaluated and set
+aside (handoff doc in the krag repo, superseded). The klams tool surface m-v
+depends on is pinned in `specs/010-klams-rag/contracts/`. Vector store,
+embedding, and ingestion are klams's concern behind that contract — improving
+them (code-aware chunking, larger embedding models) is klams roadmap, not m-v.
+klams's facts/events/knowledge model is also the planned Phase 6
+persistent-memory backend, so this boundary serves both phases.
 
 ### Tasks
-- [ ] Set up Qdrant vector store (Docker)
-- [ ] Implement embedding pipeline (Ollama + nomic-embed-text)
-- [ ] Build RAG MCP server for network deployment
-- [ ] Integrate RAG context into agent workflows
-- [ ] Add document ingestion pipeline
+- [ ] Bearer-token auth for HTTP MCP servers (`auth_token_env`)
+- [ ] Agentic retrieval: klams `memory_search` in the merged toolset, proven
+      hermetically (fake klams server)
+- [ ] Workflow retrieval: shipped RAG example (tool step → prompt step)
+- [ ] Tool-output cap evaluated against realistic retrieval payloads
+- [ ] Graceful degradation when klams is unreachable; live `#[ignore]`d
+      kubs0 tests (`just test-klams`)
 
 ### Deliverable
-- Agent retrieves relevant context from RAG for knowledge-intensive tasks
+- Agent retrieves relevant context from klams for knowledge-intensive tasks
 
 ---
 
