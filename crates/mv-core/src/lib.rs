@@ -420,6 +420,19 @@ pub enum MvError {
     /// code/message verbatim so it surfaces in the warning.
     #[error("memory operation '{op}' failed: {details}")]
     MemoryError { op: String, details: String },
+
+    /// The model backend was *reached* but answered with an error status
+    /// (e.g. Ollama 500 `llama runner process has terminated`). Distinct from
+    /// `BackendUnreachable` (a transport failure) — saying "Is the server
+    /// running?" when it just returned 500 is a lie. Fallback-eligible: a
+    /// per-model server-side failure is a sound reason to try the next model.
+    #[error("model backend at {endpoint} returned HTTP {status} for '{model}': {details}")]
+    BackendErrorResponse {
+        endpoint: String,
+        model: String,
+        status: u16,
+        details: String,
+    },
 }
 
 /// Render a per-item failure list (`AllModelsFailed`, `WorkflowParallelFailed`)

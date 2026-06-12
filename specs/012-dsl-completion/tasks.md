@@ -18,7 +18,7 @@ shipped examples pinned by validate tests.
 
 ## Phase 1: WS1 — Truthful backend errors (pulled-in fix)
 
-- [ ] T001 [WS1] Status-aware classification in
+- [X] T001 [WS1] Status-aware classification in
   `crates/mv-core/src/providers.rs`: parse status-bearing rig errors
   (`InvalidStatusCodeWithMessage`); order = TRT-LLM 502 → not-found shapes →
   4xx `CompletionFailed` → 5xx new variant; drop the bare `HttpError`
@@ -26,10 +26,10 @@ shipped examples pinned by validate tests.
   `MvError::BackendErrorResponse { endpoint, model, status, details }` with a
   truthful `Display`; eligible + retryable. Unit matrix incl. byte-for-byte
   pins of the 502/transport paths (FR-001, FR-002)
-- [ ] T002 [WS1] Hermetic CLI e2e: fake-proxy 500-with-body → truthful error
+- [X] T002 [WS1] Hermetic CLI e2e: fake-proxy 500-with-body → truthful error
   (no "Is Ollama running?"); chained primary-500 → fallback serves
   (`cli_fallback.rs`) (FR-001, FR-002, SC-001)
-- [ ] T003 [P] [WS1] `cli_klams.rs` live-skip heuristic recognizes the new
+- [X] T003 [P] [WS1] `cli_klams.rs` live-skip heuristic recognizes the new
   5xx message as "no usable model backend"; 009 lessons entry gets a
   fixed-in-012 pointer (FR-003)
 

@@ -9,7 +9,7 @@ mod support;
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::time::Duration;
-use support::{FakeProxy, dead_endpoint};
+use support::{FakeProxy, dead_endpoint, write_trtllm_models_yaml};
 
 const BACKUP_ID: &str = "backup-llama";
 const BACKUP_SERVED: &str = "fake-llama-served";
@@ -403,4 +403,76 @@ fn streaming_does_not_fall_back() {
         backup_requests, 0,
         "streaming must not reach the fallback backend"
     );
+}
+
+// --- 012/WS1: a backend that responds with an error status is truthful ---
+
+#[test]
+fn http_500_reports_truthfully_not_unreachable() {
+    // The backend is reachable (health + models pass preflight) but the
+    // completion answers 500. The error must name the status and body, not
+    // claim the server is unreachable.
+    let proxy = FakeProxy::start();
+    proxy.mount_health_ok();
+    proxy.mount_models(&["prim-served"]);
+    proxy.mount_chat_500("{\"error\":\"llama runner process has terminated\"}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_trtllm_models_yaml(dir.path(), "m", "prim-served", &proxy.endpoint());
+
+    cmd()
+        .current_dir(dir.path())
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "-m",
+            "m",
+            "--no-tools",
+            "hi",
+        ])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("returned HTTP 500"))
+        .stderr(predicate::str::contains("runner process has terminated"))
+        .stderr(predicate::str::contains("Is Ollama running").not())
+        .stderr(predicate::str::contains("Cannot reach model backend").not());
+}
+
+#[test]
+fn http_500_primary_falls_back_to_backup() {
+    // A 500 from a *reached* primary is fallback-eligible — the chain advances.
+    let primary = FakeProxy::start();
+    primary.mount_health_ok();
+    primary.mount_models(&["prim-served"]);
+    primary.mount_chat_500("{\"error\":\"runner crashed\"}");
+
+    let backup = FakeProxy::start();
+    backup.mount_health_ok();
+    backup.mount_models(&[BACKUP_SERVED]);
+    backup.mount_chat_text("Served by the backup after a 500.");
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_chain_config(
+        dir.path(),
+        "primary-llama",
+        &primary.endpoint(),
+        &backup.endpoint(),
+    );
+
+    cmd()
+        .current_dir(dir.path())
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "-m",
+            "primary-llama",
+            "--no-tools",
+            "ping",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Served by the backup after a 500.",
+        ));
 }

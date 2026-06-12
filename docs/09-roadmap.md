@@ -293,7 +293,12 @@ directory: `specs/009-routing-composition/`.
   `BackendUnreachable` (fallback-*eligible*). Triggering a genuinely
   *ineligible* error hermetically meant a 200-with-no-`choices` body, not a 5xx
   — a reminder that the proxy contract is informal and the wiremock fixture is
-  the only place it's pinned.
+  the only place it's pinned. **(Fixed in sprint 012:** a *reached* backend
+  that answers 5xx is now `BackendErrorResponse` — truthful message, still
+  fallback-eligible — instead of the misleading "Is the server running?";
+  `HttpError` no longer implies unreachable. The misclassification surfaced in
+  practice via `just run` against a model whose Ollama runner crashed — see
+  `specs/supplemental-spec.md`.**)
 - The recursive `Step` shape was the real cost of branch+parallel: `output()`
   became `Option`, and every walk (engine, validator, id/output collection,
   `outputs` mapping) had to recurse. Doing `branch` first (WS3) and letting

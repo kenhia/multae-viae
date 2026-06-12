@@ -21,12 +21,91 @@ pub fn classify_prompt_error(
     hint: &str,
     trtllm_load_id: Option<&str>,
 ) -> MvError {
-    if let rig::completion::PromptError::MaxTurnsError { max_turns, .. } = error {
+    use rig::completion::{CompletionError, PromptError};
+
+    if let PromptError::MaxTurnsError { max_turns, .. } = error {
         return MvError::MaxTurnsExceeded {
             turns: *max_turns as u64,
         };
     }
+    // A backend that answered with an error *status* was reached — classify by
+    // status (the typed shape is robust to message rewording), never as
+    // unreachable. The string path below is the fallback for layers that have
+    // already flattened the error to text (SSE streaming).
+    if let PromptError::CompletionError(CompletionError::HttpError(he)) = error
+        && let Some((status, body)) = http_status(he)
+    {
+        return classify_http_status(status, &body, model, endpoint, trtllm_load_id);
+    }
     classify_backend_error(&error.to_string(), model, endpoint, hint, trtllm_load_id)
+}
+
+/// Extract `(status, body)` from a rig HTTP-layer error that carries one.
+/// `None` for transport failures (no response — those are unreachable).
+fn http_status(e: &rig::http_client::Error) -> Option<(u16, String)> {
+    use rig::http_client::Error;
+    match e {
+        Error::InvalidStatusCodeWithMessage(s, body) => Some((s.as_u16(), body.clone())),
+        Error::InvalidStatusCode(s) => Some((s.as_u16(), String::new())),
+        _ => None,
+    }
+}
+
+/// Find a `status code NNN` (100–599) in a flattened error string. `None` if
+/// no status is present (i.e. the message is not a status-bearing response).
+fn parse_http_status(msg: &str) -> Option<u16> {
+    let lower = msg.to_lowercase();
+    let idx = lower.find("status code")?;
+    let after = &msg[idx + "status code".len()..];
+    let digits: String = after
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits
+        .parse::<u16>()
+        .ok()
+        .filter(|s| (100..=599).contains(s))
+}
+
+/// Decide the error for a backend that *responded* with `status`. Shared by
+/// the typed and string classification paths so both agree.
+fn classify_http_status(
+    status: u16,
+    body: &str,
+    model: &str,
+    endpoint: &str,
+    trtllm_load_id: Option<&str>,
+) -> MvError {
+    // TRT-LLM 502 = proxy reached but the model is not loaded; keep the hint.
+    // Checked first: the live proxy's 502 body also contains "is not found",
+    // which would otherwise be read as ModelNotFound.
+    if status == 502
+        && let Some(id) = trtllm_load_id
+    {
+        return MvError::ModelNotLoaded {
+            model: id.to_string(),
+            hint: crate::trtllm::load_hint(id),
+        };
+    }
+    if body.contains("not found") || (body.contains("model") && body.contains("pull")) {
+        return MvError::ModelNotFound {
+            model: model.to_string(),
+        };
+    }
+    if (500..=599).contains(&status) {
+        return MvError::BackendErrorResponse {
+            endpoint: endpoint.to_string(),
+            model: model.to_string(),
+            status,
+            details: body.to_string(),
+        };
+    }
+    // 4xx (or any other status that reached us): the request was understood and
+    // rejected — another model will not help. Fail fast.
+    MvError::CompletionFailed {
+        details: format!("backend returned HTTP {status}: {body}"),
+    }
 }
 
 /// Classify a backend failure from its rendered message. Used directly by
@@ -61,13 +140,17 @@ pub fn classify_backend_error(
             .and_then(|s| s.trim().trim_end_matches(')').trim().parse::<u64>().ok())
             .unwrap_or(10);
         MvError::MaxTurnsExceeded { turns }
+    } else if let Some(status) = parse_http_status(msg) {
+        // The backend responded with an error status — reached, not unreachable.
+        classify_http_status(status, msg, model, endpoint, trtllm_load_id)
     } else if msg.contains("connection")
         || msg.contains("Connection")
         || msg.contains("connect")
         || msg.contains("tcp")
         || msg.contains("error sending request")
-        || msg.contains("HttpError")
     {
+        // Genuine transport failure. NB: a bare "HttpError" no longer routes
+        // here — rig stamps it on status responses too, which are *reached*.
         MvError::BackendUnreachable {
             endpoint: endpoint.to_string(),
             hint: hint.to_string(),
@@ -92,6 +175,7 @@ impl MvError {
         matches!(
             self,
             MvError::BackendUnreachable { .. }
+                | MvError::BackendErrorResponse { .. }
                 | MvError::ModelNotLoaded { .. }
                 | MvError::ModelNotFound { .. }
                 | MvError::ApiKeyMissing { .. }
@@ -109,6 +193,7 @@ impl MvError {
         matches!(
             self,
             MvError::BackendUnreachable { .. }
+                | MvError::BackendErrorResponse { .. }
                 | MvError::CompletionFailed { .. }
                 | MvError::ToolCallFailed { .. }
                 | MvError::McpServerError { .. }
@@ -164,7 +249,9 @@ mod tests {
     }
 
     #[test]
-    fn classify_500_does_not_map_to_model_not_loaded() {
+    fn classify_500_is_a_backend_error_response_not_unreachable() {
+        // A 500 means the backend was *reached* and failed — not unreachable,
+        // and not "model not loaded" (that is the 502 mapping).
         let err = classify_backend_error(
             "HTTP error: status code: 500 Internal Server Error",
             "llama-fp8",
@@ -176,7 +263,87 @@ mod tests {
             !matches!(err, MvError::ModelNotLoaded { .. }),
             "got: {err:?}"
         );
-        assert!(matches!(err, MvError::CompletionFailed { .. }));
+        match err {
+            MvError::BackendErrorResponse { status, .. } => assert_eq!(status, 500),
+            other => panic!("expected BackendErrorResponse, got: {other:?}"),
+        }
+        // And it is fallback-eligible (try the next model).
+        assert!(err_eligible(500));
+    }
+
+    fn err_eligible(status: u16) -> bool {
+        classify_http_status(status, "", "m", "e", None).is_fallback_eligible()
+    }
+
+    #[test]
+    fn typed_500_response_reports_truthfully_not_unreachable() {
+        // The real bug: rig's CompletionError Display is "HttpError: ...", whose
+        // bare substring used to route a *reached* 500 to BackendUnreachable
+        // ("Is the server running?"). The typed path classifies by status.
+        let typed = rig::completion::PromptError::CompletionError(
+            rig::completion::CompletionError::HttpError(
+                rig::http_client::Error::InvalidStatusCodeWithMessage(
+                    reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                    "{\"error\":\"llama runner process has terminated\"}".to_string(),
+                ),
+            ),
+        );
+        let err = classify_prompt_error(
+            &typed,
+            "qwen3:8b",
+            "http://localhost:11434",
+            "Is Ollama running?",
+            None,
+        );
+        match err {
+            MvError::BackendErrorResponse {
+                status,
+                ref details,
+                ..
+            } => {
+                assert_eq!(status, 500);
+                assert!(details.contains("runner process has terminated"));
+            }
+            other => panic!("expected BackendErrorResponse, got: {other:?}"),
+        }
+        // The message must not lie about reachability.
+        let msg = err.to_string();
+        assert!(!msg.contains("Is Ollama running"), "{msg}");
+        assert!(!msg.to_lowercase().contains("cannot reach"), "{msg}");
+    }
+
+    #[test]
+    fn typed_4xx_fails_fast_not_eligible() {
+        let typed = rig::completion::PromptError::CompletionError(
+            rig::completion::CompletionError::HttpError(
+                rig::http_client::Error::InvalidStatusCodeWithMessage(
+                    reqwest::StatusCode::BAD_REQUEST,
+                    "bad request".to_string(),
+                ),
+            ),
+        );
+        let err = classify_prompt_error(&typed, "m", "http://e", "h", None);
+        assert!(
+            matches!(err, MvError::CompletionFailed { .. }),
+            "got: {err:?}"
+        );
+        assert!(!err.is_fallback_eligible());
+    }
+
+    #[test]
+    fn transport_failure_is_still_unreachable() {
+        // No status in the message → a genuine transport failure.
+        let err = classify_backend_error(
+            "error sending request for url (http://localhost:11434)",
+            "qwen3:8b",
+            "http://localhost:11434",
+            "Is Ollama running?",
+            None,
+        );
+        assert!(
+            matches!(err, MvError::BackendUnreachable { .. }),
+            "got: {err:?}"
+        );
     }
 
     #[test]
