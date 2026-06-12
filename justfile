@@ -34,3 +34,10 @@ ci:
 # heavy generations contend and time out. Run serially for stable results.
 test-trtllm:
     cargo test -p mv-cli -- --ignored --test-threads=1
+
+# Live klams RAG tests (require klams on kubs0 + KLAMS_TOKEN; KLAMS_URL and
+# KLAMS_MODEL optionally override the endpoint / agentic model). The retrieval
+# test needs only klams; the agentic test also needs a live model (skipped
+# unless KLAMS_MODEL is set). Hermetic suite stays green without any of these.
+test-klams:
+    cargo test -p mv-cli --test cli_klams -- --ignored --test-threads=1

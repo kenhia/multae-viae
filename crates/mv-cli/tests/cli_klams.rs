@@ -11,7 +11,9 @@ mod support;
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::time::Duration;
-use support::{FakeKlams, FakeProxy, KlamsChunk, write_trtllm_models_yaml};
+use support::{
+    FakeKlams, FakeProxy, KlamsChunk, dead_endpoint, dead_mcp_url, write_trtllm_models_yaml,
+};
 
 const MODEL_ID: &str = "fake-llama";
 const SERVED_NAME: &str = "fake-llama-served";
@@ -215,4 +217,167 @@ fn realistic_search_payload_stays_under_tool_output_cap() {
          FR-006 would require a per-server tool_output_limit",
         serialized.len()
     );
+}
+
+// --- WS4 (T008): graceful degradation when klams is unreachable ---
+
+#[test]
+fn dead_klams_does_not_break_a_non_rag_prompt() {
+    // A live model, a dead klams MCP endpoint. The MCP connection fails and is
+    // logged-and-skipped (the established MCP behavior); the prompt still
+    // completes via the model.
+    let proxy = FakeProxy::start();
+    proxy.mount_health_ok();
+    proxy.mount_chat_text("Answered without retrieval.");
+
+    let dir = tempfile::tempdir().unwrap();
+    let models = write_trtllm_models_yaml(dir.path(), MODEL_ID, SERVED_NAME, &proxy.endpoint());
+    let mcp_config = write_klams_mcp_config(dir.path(), &dead_mcp_url());
+
+    cmd()
+        .current_dir(dir.path())
+        .env("KLAMS_TOKEN", TOKEN)
+        .args([
+            "-vv",
+            "--config",
+            models.to_str().unwrap(),
+            "--mcp-config",
+            mcp_config.to_str().unwrap(),
+            "-m",
+            MODEL_ID,
+            "Say hi",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Answered without retrieval."))
+        // The skip is surfaced: a warning names the unreachable klams server.
+        .stderr(predicate::str::contains("klams"))
+        .stderr(predicate::str::contains("failed to connect"));
+}
+
+#[test]
+fn dead_klams_makes_a_rag_workflow_fail_loudly() {
+    // The model registry must contain the workflow's model (the pre-run
+    // reference check), but the model is never contacted — the tool step runs
+    // first and fails because `memory_search` never merged in (klams is dead).
+    let dir = tempfile::tempdir().unwrap();
+    let models = write_trtllm_models_yaml(dir.path(), MODEL_ID, SERVED_NAME, &dead_endpoint());
+    let mcp_config = write_klams_mcp_config(dir.path(), &dead_mcp_url());
+    let wf = write_rag_workflow(dir.path());
+
+    cmd()
+        .current_dir(dir.path())
+        .env("KLAMS_TOKEN", TOKEN)
+        .args([
+            "workflow",
+            "run",
+            wf.to_str().unwrap(),
+            "--config",
+            models.to_str().unwrap(),
+            "--mcp-config",
+            mcp_config.to_str().unwrap(),
+            "--input",
+            "question=anything",
+        ])
+        .assert()
+        .failure()
+        .code(1)
+        // Loud failure naming the missing tool — no silent skip.
+        .stderr(predicate::str::contains("memory_search"));
+}
+
+// --- WS5 (T009): live round-trips against the real klams on kubs0 ---
+//
+// `#[ignore]`d (run via `just test-klams`). Gated on `KLAMS_TOKEN`; the URL
+// defaults to kubs0 and is overridable with `KLAMS_URL`. These are the only
+// non-hermetic tests in the suite — they confirm the contract against the
+// real service. They early-return (skip) when `KLAMS_TOKEN` is absent so the
+// blanket `cargo test -- --ignored` sweep does not fail without credentials.
+
+fn live_klams_url() -> String {
+    std::env::var("KLAMS_URL").unwrap_or_else(|_| "http://kubs0:7777/mcp".to_string())
+}
+
+#[test]
+#[ignore = "requires a reachable klams on kubs0 and KLAMS_TOKEN"]
+fn live_klams_workflow_retrieval_round_trips() {
+    let Ok(token) = std::env::var("KLAMS_TOKEN") else {
+        eprintln!("skipping: KLAMS_TOKEN not set");
+        return;
+    };
+
+    // A model-free workflow: one memory_search tool step, output mapped out.
+    // Proves real retrieval over authenticated HTTP without needing an LLM.
+    let dir = tempfile::tempdir().unwrap();
+    let mcp_config = write_klams_mcp_config(dir.path(), &live_klams_url());
+    let wf = dir.path().join("live-retrieve.yaml");
+    std::fs::write(
+        &wf,
+        r#"
+name: live-retrieve
+version: "1.0"
+inputs:
+  - name: query
+    type: string
+    required: true
+steps:
+  - id: retrieve
+    type: tool
+    tool: memory_search
+    inputs:
+      query: "{{query}}"
+      top_k: 3
+    output: hits
+outputs:
+  - name: hits
+    from: retrieve
+"#,
+    )
+    .unwrap();
+
+    cmd()
+        .current_dir(dir.path())
+        .env("KLAMS_TOKEN", token)
+        .args([
+            "workflow",
+            "run",
+            wf.to_str().unwrap(),
+            "--mcp-config",
+            mcp_config.to_str().unwrap(),
+            "--input",
+            "query=klams memory service",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+#[ignore = "requires a reachable klams on kubs0, KLAMS_TOKEN, and a live model"]
+fn live_klams_agentic_retrieval_round_trips() {
+    let Ok(token) = std::env::var("KLAMS_TOKEN") else {
+        eprintln!("skipping: KLAMS_TOKEN not set");
+        return;
+    };
+    // The agentic path needs a real model too; the user's repo-root models.yaml
+    // and its default model are used (KLAMS_MODEL overrides). Skips if no model
+    // is named — agentic retrieval against a live LLM is opt-in.
+    let Ok(model) = std::env::var("KLAMS_MODEL") else {
+        eprintln!("skipping: KLAMS_MODEL not set (names a model in models.yaml)");
+        return;
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let mcp_config = write_klams_mcp_config(dir.path(), &live_klams_url());
+
+    cmd()
+        .env("KLAMS_TOKEN", token)
+        .args([
+            "--mcp-config",
+            mcp_config.to_str().unwrap(),
+            "-m",
+            &model,
+            "Search your memory and tell me one thing you know about klams.",
+        ])
+        .assert()
+        .success();
 }

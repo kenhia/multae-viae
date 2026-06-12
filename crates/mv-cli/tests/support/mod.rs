@@ -484,6 +484,15 @@ pub fn dead_endpoint() -> String {
     format!("http://127.0.0.1:{port}/v1")
 }
 
+/// Like [`dead_endpoint`] but shaped as an MCP `/mcp` URL — a guaranteed-dead
+/// HTTP MCP server for degradation tests.
+pub fn dead_mcp_url() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    format!("http://127.0.0.1:{port}/mcp")
+}
+
 /// Write a models.yaml in `dir` with a single TRT-LLM model pointed at the
 /// fake proxy. Returns the config path.
 pub fn write_trtllm_models_yaml(

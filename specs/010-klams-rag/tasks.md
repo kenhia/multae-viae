@@ -79,13 +79,16 @@ answered with data.
 
 ## Phase 4: WS4 — Degradation + live tests
 
-- [ ] T008 [P] [WS4] Degradation tests for the auth'd-HTTP case: dead klams
-  endpoint → non-RAG prompt succeeds with skip warning; RAG workflow tool
-  step fails loudly naming the missing tool (SC-003)
-- [ ] T009 [P] [WS4] Live `#[ignore]`d tests against kubs0
-  (`KLAMS_URL` default `http://kubs0:7777/mcp`, `KLAMS_TOKEN` required):
-  agentic + workflow round-trips; `just test-klams` recipe in the justfile
-  (FR-007, SC-006). *Prerequisite (user): mint Read token on kubs0.*
+- [X] T008 [P] [WS4] Degradation tests for the auth'd-HTTP case
+  (`cli_klams.rs`): dead klams endpoint → non-RAG prompt succeeds with a skip
+  warning naming the server; RAG workflow tool step fails loudly naming
+  `memory_search` (SC-003)
+- [X] T009 [P] [WS4] Live `#[ignore]`d tests against kubs0 (`KLAMS_URL`
+  default `http://kubs0:7777/mcp`, `KLAMS_TOKEN` required; `KLAMS_MODEL` gates
+  the agentic one): model-free workflow retrieval + agentic round-trip; both
+  early-return when `KLAMS_TOKEN` is unset so the `--ignored` sweep stays
+  green. `just test-klams` recipe added (FR-007, SC-006). *Prerequisite
+  (user): mint Read token on kubs0 — pending live run.*
 
 **Checkpoint**: failure modes proven; live path runnable on demand.
 
