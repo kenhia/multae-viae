@@ -362,23 +362,66 @@ persistent-memory backend, so this boundary serves both phases.
 
 ---
 
-## Phase 6: Always-On Agent (Weeks 21-24)
+## Phase 6: Always-On Agent
 
-**Goal**: Long-running agent service with API and monitoring capabilities.
+**Goal**: Long-running agent capabilities — persistent memory, a completed
+DSL, and a service binary.
 
-### Tasks
-- [ ] Build gRPC/REST API server (`mv-server`)
-- [ ] Implement session/conversation management
-- [ ] Add file system watching for project context
-- [ ] Implement system monitoring capabilities (CPU, memory, processes)
-- [ ] Add scheduled task execution
-- [ ] Implement persistent memory (conversations, learned preferences)
-- [ ] Add `loop` and `workflow` (nested) step types to DSL
+Restructured 2026-06-12 (the original 8-task list was the heaviest phase on
+the roadmap, like Phase 5 before the 008/009/010 split). Two of its tasks are
+amended by the klams ecosystem: **system monitoring** is collected by
+`klams-monitor` (m-v *consumes* its events via `event_search`, optionally
+adding a small `system_info` built-in tool later), and **file watching for
+project context** is covered by `klams-scanner` (real-time event *triggers*
+are a separate, later feature). gRPC is dropped from the server scope (YAGNI —
+REST now; "controller as MCP server" in Phase 7 is the second protocol).
+
+### Phase 6.1: Persistent Memory via klams (sprint 011)
+
+Because klams holds the state, persistent memory does not need the always-on
+server — the CLI gains continuity first, and `mv-server` later imports the
+same seam. Writes go through the same authenticated MCP boundary as Phase 5.5
+(contract v1.1 adds the write tools).
+
+- [ ] Contract v1.1: `register_author`, `memory_add`, `memory_append_event`,
+      `event_search` become load-bearing; Write-scoped token
+- [ ] `MemoryStore` trait in mv-core, klams-backed impl in the binary
+      (the `PromptExecutor` pattern, per the fable Phase 6 pre-work)
+- [ ] Session continuity: `--session <name>` — register author, recall before
+      the prompt, record the turn after; two runs, second remembers the first
+- [ ] Agent-writable memory: klams write tools in the merged toolset with
+      per-run author attribution
+- [ ] Degradation (memory never blocks a prompt) + stateful fake klams +
+      live kubs0 round-trip with cleanup
+
+**Deliverable**: m-v remembers across invocations — conversations recallable,
+preferences learnable — with every write attributed to a registered author.
+
+### Phase 6.2: DSL Completion (sprint 012)
+
+The `String → serde_json::Value` context migration (decided in 008; the most
+breaking change on the roadmap, landed before `mv-server` multiplies
+consumers), then the step types that need it.
+
+- [ ] `Value` context migration (typed conditions, structured tool results)
+- [ ] `loop` step (max_iterations, typed exit_condition)
+- [ ] Nested `workflow` step (cross-file cycle detection, depth cap)
+
+**Deliverable**: workflows iterate, compose, and carry structured data.
+
+### Phase 6.3: mv-server (sprint 013)
+
+- [ ] Axum REST API server (`mv-server`); `MvError::code()` for
+      machine-readable errors
+- [ ] Session/conversation management over the API (held-open agents via a
+      closed `enum AnyAgent`; memory via the 6.1 seam)
+- [ ] Scheduled workflow execution
+- [ ] Daemon pre-work from the fable register: MCP connection manager (F22),
+      shared `reqwest::Client` + `tokio::fs` in tool paths (F23)
 - [ ] Graceful shutdown and state persistence
 
-### Deliverable
-- Controller runs as a system service
-- Accepts requests via API, monitors system, executes scheduled workflows
+**Deliverable**: controller runs as a system service; accepts requests via
+API, executes scheduled workflows, consumes klams-monitor events.
 
 ---
 

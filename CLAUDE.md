@@ -112,3 +112,14 @@ active sprint is the highest-numbered one (currently `specs/007-trtllm-hardening
   MCP messages, file I/O); trust internal code.
 
 `.scratch-agent/` is your gitignored scratch space; `.scratch/` is the user's.
+
+## Markdown formatting
+
+Mirrors the GitHub Copilot instruction at
+[.github/instructions/markdown.instructions.md](.github/instructions/markdown.instructions.md)
+(applies to all `*.md`):
+
+- When consecutive lines should render as separate lines (not a merged paragraph), end each
+  line except the last with **two trailing spaces** to produce a soft line break.
+- This commonly applies to key-value metadata lines like `**Key**: value` that appear on
+  consecutive lines with no blank line between them.
