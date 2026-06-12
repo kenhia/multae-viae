@@ -15,4 +15,4 @@ updated.
 
 | Date | Change | Rationale | Commit |
 |------|--------|-----------|--------|
-| _(none yet)_ | | | |
+| 2026-06-12 | `default-run = "mv-cli"` in `crates/mv-cli/Cargo.toml` | The `fake_mcp_server` test fixture (added sprint 008) is a second bin target, making `cargo run -p mv-cli` / `just run` ambiguous. Pin the real CLI as the default-run target. | `8476338` |

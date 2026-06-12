@@ -4,6 +4,10 @@ set dotenv-load := true
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 # set positional-arguments
 
+# List available recipes
+default:
+    @just --list
+
 # Build all workspace crates
 build:
     cargo build --workspace

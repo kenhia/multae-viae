@@ -2,6 +2,10 @@
 name = "mv-cli"
 version = "0.1.0"
 edition = "2024"
+# The package has a second bin target (the `fake_mcp_server` test fixture in
+# src/bin/), so `cargo run -p mv-cli` is otherwise ambiguous. Pin the real CLI
+# as the default-run target.
+default-run = "mv-cli"
 
 [dependencies]
 mv-core = { path = "../mv-core" }
