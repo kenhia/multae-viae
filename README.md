@@ -310,3 +310,26 @@ cargo run -p mv-cli -- --mcp-config path/to/servers.yaml "Search the database"
 - All MCP connections are shut down gracefully on CLI exit
 - MCP tool calls appear in OpenTelemetry traces when `--otlp` is enabled
 
+### Persistent Memory (`--session`)
+
+With a [klams](docs/08-rag-integration.md) memory server configured, `--session`
+gives the CLI continuity across invocations: the run recalls prior turns of that
+session before answering and records the turn after, so a later run with the
+same name remembers it.
+
+```bash
+# First run records the turn under session "research"
+cargo run -p mv-cli -- --session research "What embedding model does klams use?"
+
+# A later, separate run recalls it
+cargo run -p mv-cli -- --session research "And what dimension is that?"
+```
+
+- **Opt-in**: without `--session`, nothing is read or written.
+- **Agent-writable**: with a `Read|Write` klams token, the model can call
+  `memory_add` to remember durable facts/preferences; every write is attributed
+  to the run's registered author.
+- **Best-effort**: if klams is down, the token is missing, or a write is
+  rejected (e.g. klams's backup window), the CLI warns and still answers —
+  memory never blocks a prompt.
+

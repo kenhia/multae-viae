@@ -39,9 +39,14 @@ ci:
 test-trtllm:
     cargo test -p mv-cli -- --ignored --test-threads=1
 
-# Live klams RAG tests (require klams on kubs0 + KLAMS_TOKEN; KLAMS_URL and
-# KLAMS_MODEL optionally override the endpoint / agentic model). The retrieval
-# test needs only klams; the agentic test also needs a live model (skipped
-# unless KLAMS_MODEL is set). Hermetic suite stays green without any of these.
+# Live klams tests (require klams on kubs0 + KLAMS_TOKEN). KLAMS_URL overrides
+# the endpoint. The workflow-retrieval test is model-free — it is the pure
+# "is klams reachable / auth / retrieval working" check. The agentic and memory
+# tests drive the full prompt path, so they need a reachable MODEL BACKEND
+# (m-v calls out to Ollama/TRT-LLM/cloud — it does not serve a model). They use
+# the repo's ./models.yaml; KLAMS_MODEL picks which model in it to drive (must
+# be defined there — e.g. qwen3-coder:30b), else the registry default (qwen3:8b).
+# Those two SKIP (not fail) if no backend is reachable. Hermetic suite (just ci)
+# stays green without any of this.
 test-klams:
-    cargo test -p mv-cli --test cli_klams -- --ignored --test-threads=1
+    cargo test -p mv-cli --test cli_klams -- --ignored --test-threads=1 --nocapture

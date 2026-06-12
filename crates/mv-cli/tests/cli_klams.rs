@@ -298,6 +298,42 @@ fn live_klams_url() -> String {
     std::env::var("KLAMS_URL").unwrap_or_else(|_| "http://kubs0:7777/mcp".to_string())
 }
 
+/// The repo's real `models.yaml` (absolute), so live tests resolve against the
+/// project's actual registry — not the built-in fallback that only knows
+/// `qwen3:4b`. This is why `KLAMS_MODEL` must name a model defined there.
+fn live_models_config() -> String {
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../models.yaml").to_string()
+}
+
+/// Which registered model to drive. `KLAMS_MODEL` overrides; otherwise the
+/// registry's `default:` model is used (no `-m`). m-v is a controller — it
+/// *calls* this backend (Ollama / TRT-LLM / cloud), it does not serve one — so
+/// the backend must be reachable with the model loaded for these tests to run.
+fn live_model() -> Option<String> {
+    std::env::var("KLAMS_MODEL").ok()
+}
+
+/// Run a model-driven live invocation. If it fails purely because no model
+/// backend is reachable, **skip** rather than fail — these tests exercise the
+/// full prompt path, and a missing backend means "not applicable here", not a
+/// klams regression. The model-free `live_klams_workflow_retrieval` test is the
+/// klams-only check. Returns the captured stderr when the command ran, or
+/// `None` when skipped.
+fn run_live_model(cmd: &mut Command, what: &str) -> Option<String> {
+    let out = cmd.output().expect("spawn mv-cli");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() && stderr.contains("Cannot reach model backend") {
+        eprintln!(
+            "SKIP {what}: no model backend reachable. These live tests drive a real \
+             model (m-v calls out to Ollama/TRT-LLM/cloud — it does not serve one). \
+             Start the backend, or set KLAMS_MODEL to a model your machine can reach."
+        );
+        return None;
+    }
+    assert!(out.status.success(), "{what} failed:\n{stderr}");
+    Some(stderr)
+}
+
 #[test]
 #[ignore = "requires a reachable klams on kubs0 and KLAMS_TOKEN"]
 fn live_klams_workflow_retrieval_round_trips() {
@@ -351,33 +387,102 @@ outputs:
         .success();
 }
 
+/// Build a live model-driven `mv-cli` invocation: bearer token in env, the
+/// repo's real model registry (`--config`), the klams MCP config, optional
+/// `-m <KLAMS_MODEL>` (else the registry default), then `extra` args + prompt.
+fn live_model_cmd(
+    token: &str,
+    mcp_config: &std::path::Path,
+    extra: &[&str],
+    prompt: &str,
+) -> Command {
+    let mut c = Command::cargo_bin("mv-cli").unwrap();
+    c.timeout(Duration::from_secs(60));
+    c.env("KLAMS_TOKEN", token);
+    let mut args: Vec<String> = vec![
+        "--config".into(),
+        live_models_config(),
+        "--mcp-config".into(),
+        mcp_config.to_string_lossy().into_owned(),
+    ];
+    if let Some(model) = live_model() {
+        args.push("-m".into());
+        args.push(model);
+    }
+    for a in extra {
+        args.push((*a).to_string());
+    }
+    args.push(prompt.to_string());
+    c.args(&args);
+    c
+}
+
 #[test]
-#[ignore = "requires a reachable klams on kubs0, KLAMS_TOKEN, and a live model"]
+#[ignore = "requires klams on kubs0 + KLAMS_TOKEN; needs a reachable model backend (skips if none)"]
 fn live_klams_agentic_retrieval_round_trips() {
     let Ok(token) = std::env::var("KLAMS_TOKEN") else {
         eprintln!("skipping: KLAMS_TOKEN not set");
         return;
     };
-    // The agentic path needs a real model too; the user's repo-root models.yaml
-    // and its default model are used (KLAMS_MODEL overrides). Skips if no model
-    // is named — agentic retrieval against a live LLM is opt-in.
-    let Ok(model) = std::env::var("KLAMS_MODEL") else {
-        eprintln!("skipping: KLAMS_MODEL not set (names a model in models.yaml)");
+    let dir = tempfile::tempdir().unwrap();
+    let mcp_config = write_klams_mcp_config(dir.path(), &live_klams_url());
+
+    let mut c = live_model_cmd(
+        &token,
+        &mcp_config,
+        &[],
+        "Search your memory and tell me one thing you know about klams.",
+    );
+    // Skips cleanly if no model backend is up — see run_live_model.
+    run_live_model(&mut c, "live_klams_agentic_retrieval");
+}
+
+#[test]
+#[ignore = "requires klams on kubs0 + KLAMS_TOKEN; needs a reachable model backend (skips if none)"]
+fn live_klams_memory_round_trips() {
+    // Sprint 011: exercise the full live memory path through the CLI —
+    // register → recall → record across two `--session` invocations against the
+    // real klams + a real model. Writes land under agent `mv-cli`,
+    // session_title `mv-live-memory-test` (the CLI's fixed agent_name); the CLI
+    // has no delete surface this sprint, so these writes are identifiable for
+    // manual pruning by session.
+    let Ok(token) = std::env::var("KLAMS_TOKEN") else {
+        eprintln!("skipping: KLAMS_TOKEN not set");
         return;
     };
 
     let dir = tempfile::tempdir().unwrap();
     let mcp_config = write_klams_mcp_config(dir.path(), &live_klams_url());
+    let session = "mv-live-memory-test";
 
-    cmd()
-        .env("KLAMS_TOKEN", token)
-        .args([
-            "--mcp-config",
-            mcp_config.to_str().unwrap(),
-            "-m",
-            &model,
-            "Search your memory and tell me one thing you know about klams.",
-        ])
-        .assert()
-        .success();
+    // Invocation 1: record a turn. Skip the whole test if no model backend.
+    let mut record = live_model_cmd(
+        &token,
+        &mcp_config,
+        &["--session", session],
+        "Briefly: what is klams?",
+    );
+    if run_live_model(&mut record, "live_klams_memory (record)").is_none() {
+        return;
+    }
+
+    // Invocation 2 (new process), same session: must register, recall the prior
+    // turn, answer, and record again — all live.
+    let mut recall = live_model_cmd(
+        &token,
+        &mcp_config,
+        &["--session", session],
+        "What did I just ask you about?",
+    );
+    let stderr = match run_live_model(&mut recall, "live_klams_memory (recall)") {
+        Some(s) => s,
+        None => return,
+    };
+
+    // Success alone is weak (memory is best-effort and degrades silently); assert
+    // memory actually engaged — registration against live klams did NOT warn.
+    assert!(
+        !stderr.contains("memory unavailable"),
+        "live klams memory should have engaged, but registration warned:\n{stderr}"
+    );
 }

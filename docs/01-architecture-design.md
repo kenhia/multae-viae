@@ -330,7 +330,7 @@ multae-viae/
 └── workflows/              # Example workflow YAML files
 ```
 
-## Current Implementation (through Sprint 010)
+## Current Implementation (through Sprint 011)
 
 The CLI operates as an agentic system with built-in tools (Sprint 003). The
 architecture uses Rig's native multi-turn agent loop — tools are registered with
@@ -375,6 +375,16 @@ Subsequent sprints layered on:
   server is built here — klams owns that behind the contract in
   `specs/010-klams-rag/contracts/`. Tested hermetically against a fake klams
   MCP server; live round-trips behind `just test-klams`.
+- **Sprint 011 — persistent memory via klams**: `mv_core::memory::MemoryStore`
+  (trait in core, `KlamsMemory` impl in the binary — the `PromptExecutor`
+  pattern) gives the CLI cross-invocation continuity through the *same* MCP
+  handle as retrieval (no new client/protocol). `--session <name>` registers a
+  per-run author, recalls prior turns + relevant memories before the
+  completion, and records the turn after; with a `Read|Write` token the model
+  can also call `memory_add` itself, attributed to the run's author. Memory is
+  best-effort — never blocks a prompt. `FakeKlams` is now stateful; live
+  round-trips behind `just test-klams`. Contract v1.1 in
+  `specs/011-klams-memory/contracts/`. New `MvError::MemoryError`.
 
 ### Tool Architecture
 

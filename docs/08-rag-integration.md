@@ -45,10 +45,12 @@ The klams tool surface m-v depends on is pinned in
 — that contract is the source of truth; additive klams changes are safe,
 breaking ones require coordination.
 
-**Sprint 010 is read-only.** m-v calls `memory_search` (and could call
-`memory_related` / `event_search`) under a **`Read`-scoped** token. Memory
-*writes* (`register_author`, `memory_add`, `memory_append_event`) are deferred
-to Phase 6 (persistent memory), where author lifecycle deserves its own design.
+**Sprint 010 was read-only; sprint 011 added writes.** Retrieval uses
+`memory_search` under a `Read` token. Persistent memory (sprint 011, below)
+adds the write tools (`register_author`, `memory_add`, `memory_append_event`,
+`event_search`) under a `Read|Write` token — pinned in
+[`specs/011-klams-memory/contracts/klams-tool-surface.md`](../specs/011-klams-memory/contracts/klams-tool-surface.md)
+(v1.1, which supersedes 010's).
 
 `memory_search` takes `{ query, top_k?, kinds?, tags? }` and returns ranked
 `PublicMemory` items. Knowledge items carry `text`, `source_path`, `tags`, and
@@ -117,6 +119,44 @@ for prompt-bound retrieval. The cap is deliberately a single universal value,
 not per-server (measured in `cli_klams.rs`; see
 `specs/010-klams-rag/plan.md` §6).
 
+## Persistent memory (sprint 011)
+
+Because klams holds the state, the CLI gains cross-invocation memory without
+any always-on server. Memory is **opt-in per run** via `--session <name>` and
+**best-effort throughout** — it never blocks or fails the user's prompt.
+
+A memory-active run (klams configured, `--session` set, tools attached):
+
+1. **Registers** an author once — `register_author` with `agent_name: "mv-cli"`,
+   the resolved model, and the session name as `session_title`. klams mints a
+   fresh author per call, so each run's writes are attributable; the returned
+   `author_id` stamps every write. (Registration failure ⇒ warn, run with no
+   memory.)
+2. **Recalls** before answering — recent turns of this session
+   (`event_search`, `payload_match {session}`, newest-first) plus relevant
+   memories (`memory_search`) are rendered into a context block prepended to
+   the prompt.
+3. **Records** after answering — one `conversation` event
+   (`memory_append_event`) carrying `{session, prompt, response, model_used}`,
+   with oversized fields truncated client-side (events are records, not
+   archives). Recorded *before* MCP teardown, since recording itself talks to
+   klams.
+
+**Agent-writable memory.** With the `Read|Write` token, klams's write tools are
+in the merged tool set, so the model can call `memory_add` itself. A capability
+note carrying the run's `author_id` is surfaced to the model (the model can't
+fill `memory_add`'s required `author_id` otherwise). It currently rides the
+prompt prefix rather than a true system-preamble suffix — the preamble is fixed
+at the provider call sites; threading an override is a documented later step.
+
+Without `--session`, m-v reads and writes nothing and surfaces no capability
+note — no phantom memory.
+
+**Attribution.** Every write carries the run's registered `author_id`; klams's
+soft-delete + admin restore is the recovery net for agent writes. Live tests
+register under session `mv-live-memory-test` for identification (the CLI has no
+delete surface this sprint, so test writes are pruned manually by session).
+
 ## Degraded mode
 
 If klams is unreachable, the MCP connection failure is **logged and skipped** —
@@ -125,6 +165,11 @@ server never aborts the run). A workflow that *requires* `memory_search` fails
 loudly with the usual unknown-tool error, naming the missing tool. A
 missing/empty `auth_token_env` variable is an actionable, non-fatal error
 naming the variable and server.
+
+For **memory**, every failure degrades the same way: a dead klams, a missing
+token, or a rejected write (the klams backup **maintenance window**, or
+embedding being down) becomes a one-line stderr warning carrying klams's
+machine-readable code — the completion always proceeds.
 
 ## Ingestion (klams-side)
 

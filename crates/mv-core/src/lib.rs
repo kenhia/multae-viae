@@ -4,6 +4,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 pub mod mcp;
+pub mod memory;
 pub mod preflight;
 pub mod providers;
 pub mod tools;
@@ -413,6 +414,12 @@ pub enum MvError {
         /// `(child_step_id, failure message)` pairs, one per failed child.
         failures: Vec<(String, String)>,
     },
+
+    /// A persistent-memory operation failed. Memory is best-effort: callers
+    /// warn-and-continue. `details` carries klams's machine-readable error
+    /// code/message verbatim so it surfaces in the warning.
+    #[error("memory operation '{op}' failed: {details}")]
+    MemoryError { op: String, details: String },
 }
 
 /// Render a per-item failure list (`AllModelsFailed`, `WorkflowParallelFailed`)
