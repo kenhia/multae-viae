@@ -330,7 +330,7 @@ multae-viae/
 └── workflows/              # Example workflow YAML files
 ```
 
-## Current Implementation (through Sprint 011)
+## Current Implementation (through Sprint 012)
 
 The CLI operates as an agentic system with built-in tools (Sprint 003). The
 architecture uses Rig's native multi-turn agent loop — tools are registered with
@@ -385,6 +385,17 @@ Subsequent sprints layered on:
   best-effort — never blocks a prompt. `FakeKlams` is now stateful; live
   round-trips behind `just test-klams`. Contract v1.1 in
   `specs/011-klams-memory/contracts/`. New `MvError::MemoryError`.
+- **Sprint 012 — DSL completion**: the workflow `ExecutionContext` migrated
+  from `String` to `serde_json::Value`, so templates do field access
+  (`{{report.title}}`) and conditions compare typed (`score >= 8` numeric);
+  `extract_json` stores the parsed value. New steps `loop` (do-while with a
+  typed `exit_condition` and `max_iterations` cap) and `workflow` (run another
+  file as a step — isolated child context, child outputs returned as one
+  object, cross-file cycle detection + depth cap). Also a pulled-in routing
+  fix: a backend that *responds* with a 5xx is now `BackendErrorResponse`
+  (truthful, fallback-eligible) instead of being misclassified as
+  `BackendUnreachable`. New `MvError` variants (`BackendErrorResponse`,
+  `WorkflowCycle`, `WorkflowDepthExceeded`).
 
 ### Tool Architecture
 

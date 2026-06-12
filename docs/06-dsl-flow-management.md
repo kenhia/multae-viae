@@ -191,11 +191,14 @@ defines it (a missing `else` defines nothing). Referencing an output defined in
 just one arm is a validation error — that is why both arms above write
 `detailed_analysis`.
 
-**Truthiness caveat.** Context values are strings today, so a bare
-`condition: "flag"` is truthy whenever the string is non-empty — the literal
-string `"false"` is truthy. Prefer explicit comparisons
-(`condition: "flag == 'on'"`). Typed values arrive with the Phase 6 `Value`
-context migration.
+**Typed conditions (sprint 012).** The execution context holds typed JSON
+values (`serde_json::Value`), so conditions evaluate with real types:
+`condition: "result.score >= 8"` is a **numeric** comparison, and a JSON
+`false` is genuinely falsy. Workflow inputs and model/tool text still arrive as
+strings (so a bare `condition: "flag"` is truthy for any non-empty string —
+prefer `flag == 'on'`), but values produced by `extract_json` or a nested
+workflow carry their JSON types. This retired the pre-012 "everything is a
+string, so `\"false\"` is truthy" caveat.
 
 #### `parallel` — Concurrent Execution **(shipped — sprint 009)**
 
@@ -223,27 +226,56 @@ the step reports every failure.
 # After the join, both `web_results` and `doc_results` are in the context.
 ```
 
-#### `loop` — Iterative Execution **(Not yet implemented — planned Phase 5/6)**
+#### `loop` — Iterative Execution **(shipped — sprint 012)**
+
+Runs its body repeatedly with **do-while** semantics: the body executes, then
+`exit_condition` (an optional bare minijinja expression, like `branch`) is
+evaluated against the full context — a truthy result stops the loop. The body
+runs at least once and at most `max_iterations` times; reaching the cap is
+normal termination, not an error. Because `extract_json` makes values typed,
+`review.score >= 8` is a real numeric comparison.
 
 ```yaml
 - id: refine
   type: loop
   max_iterations: 3
+  exit_condition: "review.score >= 8"   # evaluated after each iteration
   steps:
-    - id: evaluate
+    - id: draft
       type: prompt
-      model: qwen3:8b
-      template: "Evaluate this draft: {{draft}}\nScore 1-10 and suggest improvements."
-      output: evaluation
-    - id: improve
-      type: prompt
-      model: qwen3:8b
-      template: "Improve this draft based on feedback:\n{{draft}}\n{{evaluation}}"
+      template: "Write a paragraph about {{topic}}."
       output: draft
-  exit_condition: "{{evaluation.score}} >= 8"
+    - id: critique
+      type: prompt
+      template: "Score this 1-10, return JSON {\"score\": N}:\n{{draft}}"
+      output: review_raw
+    - id: score
+      type: transform
+      operation: extract_json
+      input: "{{review_raw}}"
+      output: review
 ```
 
-#### `workflow` — Nested Workflow **(Not yet implemented — planned Phase 5/6)**
+**Body validation (v1 scope).** A loop body validates like any linear
+sequence: a step may reference outputs defined *earlier in the body*, but not
+its own output or a later step's. So a step cannot read its own previous-
+iteration output yet — cross-iteration refinement (draft N editing draft N-1)
+is a documented future extension; today the body re-runs from its inputs each
+iteration. The body runs at least once, so its outputs are definitely defined
+after the loop (and the exit condition may reference them). See
+[`workflows/examples/loop-example.yaml`](../workflows/examples/loop-example.yaml).
+
+#### `workflow` — Nested Workflow **(shipped — sprint 012)**
+
+Runs another workflow file as one step. `file` resolves relative to the parent
+workflow's directory; `inputs` are templated against the parent context and
+become the child's inputs (the child sees **only** these — no parent-context
+leakage). The child's declared outputs return as **one object** stored at
+`output`, so a later step reaches into them with field access
+(`{{sub_result.answer}}`). Cross-file **cycles** (re-entering a running
+workflow) and nesting past the depth cap (8) are rejected; `workflow validate`
+loads and checks the child file too. See
+[`workflows/examples/subworkflow-example.yaml`](../workflows/examples/subworkflow-example.yaml).
 
 ```yaml
 - id: sub_task
@@ -252,6 +284,7 @@ the step reports every failure.
   inputs:
     topic: "{{sub_topic}}"
   output: sub_result
+# Downstream: {{sub_task_result_field}} via {{sub_result.<child output name>}}
 ```
 
 ### Model Specification
@@ -322,6 +355,22 @@ messages:
     content: "Research the following topic: {{topic}}"
 ```
 
+### Typed values (sprint 012)
+
+The execution context holds typed JSON values, not strings. This means:
+
+- **Field access** in templates and conditions: `{{report.title}}`,
+  `report.score >= 8`. A `transform` (`extract_json`) or a nested `workflow`
+  step introduces structure; workflow inputs and model/tool text remain
+  strings.
+- **Interpolation**: a string value renders raw (no quotes — unchanged from
+  before); a container renders via minijinja's native formatting (e.g. a list
+  as `["a", "b"]`). Reach into fields rather than interpolating whole
+  containers into a prompt.
+- **Output printing** (`mv-cli workflow run`): in `--json`, outputs serialize
+  naturally; in text mode a string output prints raw and any other value
+  prints as pretty JSON.
+
 ## Rust Implementation
 
 ### Parsing
@@ -353,7 +402,10 @@ enum Step {
     Branch(BranchStep),       // shipped, sprint 009
     #[serde(rename = "parallel")]
     Parallel(ParallelStep),   // shipped, sprint 009
-    // Planned Phase 6: Loop, SubWorkflow
+    #[serde(rename = "loop")]
+    Loop(LoopStep),           // shipped, sprint 012
+    #[serde(rename = "workflow")]
+    SubWorkflow(SubWorkflowStep), // shipped, sprint 012
 }
 ```
 
@@ -435,7 +487,9 @@ never disagree). Options considered:
    **shipped** (sprints 005–008, plus `template_file`, transforms, and retry)
 2. **Branching, parallel execution, model preference lists** —
    **shipped** (sprint 009)
-3. **Adaptive model routing, loop constructs, nested workflows** — adaptive
-   routing in Phase 7; `loop` and nested `workflow` steps in Phase 6
-4. **Event triggers, runtime overrides** — Phase 6+
-5. **Visual editor** in the dashboard project
+3. **Typed (`Value`) context, `loop`, nested `workflow`** —
+   **shipped** (sprint 012)
+4. **Adaptive model routing** — Phase 7 (layered on the Phase 5 mechanism)
+5. **Cross-iteration loop refinement** (a step reading its own prior-iteration
+   output), **event triggers, runtime overrides** — Phase 6+
+6. **Visual editor** in the dashboard project

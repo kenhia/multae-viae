@@ -104,14 +104,14 @@ shipped examples pinned by validate tests.
 
 ## Phase 5: WS5 — Docs truth pass (polish)
 
-- [ ] T014 [WS5] docs/06: drop "Not yet implemented" for `loop`/`workflow`;
+- [X] T014 [WS5] docs/06: drop "Not yet implemented" for `loop`/`workflow`;
   document Value semantics (field access, typed conditions, interpolation +
   printing rules verbatim from the pinned tests); loop do-while/cap rules;
   cycle/depth rules; fix the previously-stale numeric-condition example;
   retire the string-truthiness caveat; refresh the Evolution Path (FR-012)
-- [ ] T015 [P] [WS5] docs/01 sprint-012 entry (Value migration, new steps,
+- [X] T015 [P] [WS5] docs/01 sprint-012 entry (Value migration, new steps,
   truthful classification); README workflow section touch-up (FR-012)
-- [ ] T016 [P] [WS5] Roadmap Phase 6.2 checkboxes + lessons learned;
+- [X] T016 [P] [WS5] Roadmap Phase 6.2 checkboxes + lessons learned;
   supplemental-spec: change-log rows get the 012 PR ref, rollup note marked
   done (both local branches deleted after merge) (FR-012)
 
