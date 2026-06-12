@@ -112,6 +112,24 @@ steps:
         .stderr(predicate::str::contains("duplicate step id"));
 }
 
+// --- 010/WS3: the shipped RAG example must validate ---
+
+#[test]
+fn shipped_rag_example_validates() {
+    // Guards the RAG example against rot. `workflow validate` is structural
+    // (tool names like `memory_search` are resolved only at runtime), so this
+    // checks the template references, the tool-step shape, and the output map.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../workflows/examples/rag-example.yaml"
+    );
+    cmd()
+        .args(["workflow", "validate", path])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("valid"));
+}
+
 // --- 009/WS3: the shipped branch example must validate ---
 
 #[test]

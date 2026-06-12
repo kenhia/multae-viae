@@ -91,6 +91,49 @@ pub async fn connect_stdio(
     })
 }
 
+/// Build the reqwest client for an HTTP MCP server, attaching a bearer
+/// `Authorization` default header when `auth_token_env` names a present
+/// environment variable.
+///
+/// The token's *value* is read here and lives only inside the header map; it
+/// is never logged, traced, or placed in an error (errors name the variable,
+/// not its contents). A named-but-unset/empty variable is a hard error — the
+/// caller asked for auth and we cannot provide it.
+fn build_http_client(config: &McpServerConfig) -> Result<reqwest::Client, MvError> {
+    let Some(var) = config.auth_token_env.as_deref() else {
+        return Ok(reqwest::Client::new());
+    };
+
+    let token = std::env::var(var)
+        .ok()
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| MvError::McpServerError {
+            server: config.name.clone(),
+            details: format!("auth_token_env '{var}' is not set (or empty) in the environment"),
+        })?;
+
+    let mut value =
+        reqwest::header::HeaderValue::try_from(format!("Bearer {token}")).map_err(|_| {
+            MvError::McpServerError {
+                server: config.name.clone(),
+                // The token is malformed as a header; do not echo it.
+                details: format!("token from '{var}' is not a valid HTTP header value"),
+            }
+        })?;
+    value.set_sensitive(true);
+
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(reqwest::header::AUTHORIZATION, value);
+
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .build()
+        .map_err(|e| MvError::McpServerError {
+            server: config.name.clone(),
+            details: format!("failed to build HTTP client: {e}"),
+        })
+}
+
 /// Connect to an HTTP-based MCP server.
 #[tracing::instrument(skip(handle), fields(mcp.server.name = %config.name, mcp.transport = "http"))]
 pub async fn connect_http(
@@ -108,8 +151,9 @@ pub async fn connect_http(
 
     info!(server = %config.name, url = %url, "connecting to MCP server via HTTP");
 
+    let client = build_http_client(config)?;
     let http_config = StreamableHttpClientTransportConfig::with_uri(url.as_str());
-    let transport = StreamableHttpClientTransport::with_client(reqwest::Client::new(), http_config);
+    let transport = StreamableHttpClientTransport::with_client(client, http_config);
 
     let handler = McpClientHandler::new(client_info(), handle);
     let service = handler
@@ -188,6 +232,7 @@ mod tests {
             args: vec![],
             env: HashMap::new(),
             url: None,
+            auth_token_env: None,
         };
 
         let result = connect_stdio(&config, handle).await;
@@ -209,12 +254,57 @@ mod tests {
             args: vec![],
             env: HashMap::new(),
             url: None,
+            auth_token_env: None,
         };
 
         let result = connect_stdio(&config, handle).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("stdio transport requires 'command'"), "{err}");
+    }
+
+    fn http_config_with_auth(name: &str, auth_token_env: Option<&str>) -> McpServerConfig {
+        McpServerConfig {
+            name: name.to_string(),
+            transport: McpTransportType::Http,
+            command: None,
+            args: vec![],
+            env: HashMap::new(),
+            url: Some("http://127.0.0.1:1/mcp".to_string()),
+            auth_token_env: auth_token_env.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn build_http_client_no_auth_succeeds() {
+        let config = http_config_with_auth("plain", None);
+        assert!(build_http_client(&config).is_ok());
+    }
+
+    #[test]
+    fn build_http_client_missing_env_var_errors_naming_var() {
+        // A variable name that is not set in the environment.
+        let config = http_config_with_auth("klams", Some("MV_TEST_DEFINITELY_UNSET_TOKEN"));
+        let err = build_http_client(&config).unwrap_err().to_string();
+        assert!(err.contains("MV_TEST_DEFINITELY_UNSET_TOKEN"), "{err}");
+        assert!(err.contains("klams"), "{err}");
+        assert!(err.contains("not set"), "{err}");
+    }
+
+    #[test]
+    fn build_http_client_with_token_succeeds_and_hides_value() {
+        // SAFETY: single-threaded test; var is unique to this test.
+        let var = "MV_TEST_KLAMS_TOKEN_OK";
+        unsafe { std::env::set_var(var, "s3cr3t-value") };
+        let config = http_config_with_auth("klams", Some(var));
+        let client = build_http_client(&config);
+        unsafe { std::env::remove_var(var) };
+        let client = client.expect("client builds with a present token");
+        // reqwest marks the header sensitive; its Debug must not leak the token.
+        assert!(
+            !format!("{client:?}").contains("s3cr3t-value"),
+            "token value must not appear in client Debug"
+        );
     }
 
     #[tokio::test]
@@ -227,6 +317,7 @@ mod tests {
             args: vec![],
             env: HashMap::new(),
             url: None,
+            auth_token_env: None,
         };
 
         let result = connect_http(&config, handle).await;
@@ -245,6 +336,7 @@ mod tests {
             args: vec![],
             env: HashMap::new(),
             url: Some("http://127.0.0.1:1/mcp".to_string()),
+            auth_token_env: None,
         };
 
         let result = connect_http(&config, handle).await;
@@ -268,6 +360,7 @@ mod tests {
                     args: vec![],
                     env: HashMap::new(),
                     url: None,
+                    auth_token_env: None,
                 },
                 McpServerConfig {
                     name: "fail2".to_string(),
@@ -276,6 +369,7 @@ mod tests {
                     args: vec![],
                     env: HashMap::new(),
                     url: None,
+                    auth_token_env: None,
                 },
             ],
         };

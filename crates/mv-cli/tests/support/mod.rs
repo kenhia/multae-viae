@@ -18,8 +18,8 @@
 //! server runs on a private tokio runtime owned by the fixture — tests stay
 //! plain `#[test]` functions and drive the binary synchronously.
 
-use wiremock::matchers::{body_string_contains, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::matchers::{body_string_contains, header, method, path};
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 /// A running fake proxy. Dropping it shuts down both the mock server and its
 /// runtime.
@@ -272,6 +272,208 @@ impl FakeProxy {
     }
 }
 
+// ---------------------------------------------------------------------------
+// FakeKlams: a hermetic klams MCP server over Streamable HTTP.
+//
+// klams speaks MCP over Streamable HTTP with a scoped bearer token. This
+// fixture stands in for it: a wiremock server that (a) requires the exact
+// bearer header on `/mcp` (a missing/wrong token simply does not match, so the
+// rmcp handshake fails — that *is* the auth enforcement), (b) answers the
+// JSON-RPC subset rmcp's client drives (initialize → notifications/initialized
+// → tools/list → tools/call), and (c) returns `memory_search` results shaped
+// like klams's `PublicMemory` knowledge items (see
+// specs/010-klams-rag/contracts/klams-tool-surface.md).
+//
+// Streamable HTTP specifics handled here, learned from the rmcp 1.5 client:
+//   - initialize MUST return an `Mcp-Session-Id` header (the client errors with
+//     `MissingSessionIdInResponse` otherwise — it is not stateless by default);
+//   - plain `application/json` JSON-RPC responses are accepted (no SSE needed);
+//   - the client opens a background GET for an SSE stream — answering 405 maps
+//     to `ServerDoesNotSupportSse`, which the client tolerates and skips.
+// Each response echoes the request's JSON-RPC `id`, so a custom `Respond` impl
+// (not a static template) is required.
+// ---------------------------------------------------------------------------
+
+/// One seeded knowledge chunk the fake `memory_search` will return.
+pub struct KlamsChunk {
+    pub text: String,
+    pub source_path: String,
+}
+
+/// Custom wiremock responder implementing the MCP JSON-RPC subset.
+struct McpResponder {
+    session_id: String,
+    tools_list_result: serde_json::Value,
+    /// The text content block returned by a `tools/call` — a JSON-serialized
+    /// array of `PublicMemory` knowledge items.
+    search_result_text: String,
+}
+
+impl Respond for McpResponder {
+    fn respond(&self, req: &Request) -> ResponseTemplate {
+        let msg: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let id = msg.get("id").cloned();
+        let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
+
+        match method {
+            "initialize" => {
+                let requested = msg
+                    .get("params")
+                    .and_then(|p| p.get("protocolVersion"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("2025-06-18");
+                ResponseTemplate::new(200)
+                    .insert_header("Mcp-Session-Id", self.session_id.as_str())
+                    .set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "protocolVersion": requested,
+                            "capabilities": {"tools": {}},
+                            "serverInfo": {"name": "fake-klams", "version": "0.1.0"},
+                        },
+                    }))
+            }
+            // A notification (no id): acknowledge with 202 Accepted.
+            "notifications/initialized" => ResponseTemplate::new(202),
+            "tools/list" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": self.tools_list_result,
+            })),
+            "tools/call" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "content": [{"type": "text", "text": self.search_result_text}],
+                    "isError": false,
+                },
+            })),
+            "ping" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": id, "result": {},
+            })),
+            other => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {"code": -32601, "message": format!("method not found: {other}")},
+            })),
+        }
+    }
+}
+
+/// `tools/list` payload advertising the single `memory_search` tool, matching
+/// the klams arg schema (`query` required; `top_k`, `kinds`, `tags` optional).
+fn memory_search_tool_list() -> serde_json::Value {
+    serde_json::json!({
+        "tools": [{
+            "name": "memory_search",
+            "description": "Search the knowledge base (hybrid vector + full-text). \
+                            Returns ranked memory items.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "natural-language query"},
+                    "top_k": {"type": "integer", "description": "max results (1..50)"},
+                },
+                "required": ["query"],
+            },
+        }],
+    })
+}
+
+/// Serialize seeded chunks as a JSON array of klams `PublicMemory` knowledge
+/// items — the wire shape m-v's contract pins.
+fn chunks_to_public_memory(chunks: &[KlamsChunk]) -> String {
+    let items: Vec<serde_json::Value> = chunks
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            serde_json::json!({
+                "id": format!("00000000-0000-7000-8000-{:012}", i),
+                "kind": "knowledge",
+                "text": c.text,
+                "source_path": c.source_path,
+                "tags": ["seed"],
+                "author": {"id": "00000000-0000-7000-8000-000000000aaa", "agent_name": "klams-scanner"},
+                "created_at": "2026-06-01T00:00:00Z",
+                "updated_at": "2026-06-01T00:00:00Z",
+            })
+        })
+        .collect();
+    serde_json::to_string(&items).expect("serialize PublicMemory items")
+}
+
+/// Public accessor for the serialized `PublicMemory` payload — lets tests
+/// measure realistic `memory_search` output size (FR-006 cap gate).
+pub fn public_memory_json(chunks: &[KlamsChunk]) -> String {
+    chunks_to_public_memory(chunks)
+}
+
+/// A running fake klams MCP server. Dropping it shuts down the server and its
+/// runtime.
+pub struct FakeKlams {
+    rt: tokio::runtime::Runtime,
+    server: MockServer,
+}
+
+impl FakeKlams {
+    /// Start a fake klams that requires `bearer_token` and seeds `memory_search`
+    /// with `chunks`.
+    pub fn start(bearer_token: &str, chunks: &[KlamsChunk]) -> Self {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("build fixture runtime");
+        let server = rt.block_on(MockServer::start());
+
+        let responder = McpResponder {
+            session_id: "klams-test-session".to_string(),
+            tools_list_result: memory_search_tool_list(),
+            search_result_text: chunks_to_public_memory(chunks),
+        };
+
+        // POST /mcp — guarded by the exact bearer header. A request without it
+        // does not match and falls through to wiremock's 404, so the handshake
+        // fails: the bearer is genuinely required.
+        rt.block_on(
+            server.register(
+                Mock::given(method("POST"))
+                    .and(path("/mcp"))
+                    .and(header(
+                        "authorization",
+                        format!("Bearer {bearer_token}").as_str(),
+                    ))
+                    .respond_with(responder),
+            ),
+        );
+
+        // GET /mcp — the client's background SSE attempt. 405 → the client
+        // records "server does not support SSE" and proceeds over plain JSON.
+        rt.block_on(
+            server.register(
+                Mock::given(method("GET"))
+                    .and(path("/mcp"))
+                    .respond_with(ResponseTemplate::new(405)),
+            ),
+        );
+
+        Self { rt, server }
+    }
+
+    /// The `url:` to put in an `mcp-servers.yaml` http entry.
+    pub fn mcp_url(&self) -> String {
+        format!("{}/mcp", self.server.uri())
+    }
+
+    /// All requests received so far (for asserting the bearer reached the wire).
+    pub fn received_requests(&self) -> Vec<wiremock::Request> {
+        self.rt
+            .block_on(self.server.received_requests())
+            .unwrap_or_default()
+    }
+}
+
 /// Reserve an ephemeral TCP port, then drop the listener — the returned
 /// `…/v1` URL is guaranteed to refuse connections for the test's duration.
 /// Used to simulate a dead backend deterministically (no live-port races).
@@ -280,6 +482,15 @@ pub fn dead_endpoint() -> String {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     format!("http://127.0.0.1:{port}/v1")
+}
+
+/// Like [`dead_endpoint`] but shaped as an MCP `/mcp` URL — a guaranteed-dead
+/// HTTP MCP server for degradation tests.
+pub fn dead_mcp_url() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    format!("http://127.0.0.1:{port}/mcp")
 }
 
 /// Write a models.yaml in `dir` with a single TRT-LLM model pointed at the

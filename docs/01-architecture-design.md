@@ -145,7 +145,10 @@ Will maintain the environmental context for agent operations:
 Uses the **RMCP** crate (`rmcp`) to connect to MCP servers. Supports:
 
 - **stdio transport**: For local MCP servers (spawned as child processes)
-- **Streamable HTTP transport**: For remote MCP servers on the network
+- **Streamable HTTP transport**: For remote MCP servers on the network,
+  with optional **bearer auth** via `auth_token_env` (sprint 010) — the
+  token is read from a named env var into an `Authorization` header, kept
+  out of config/logs/traces, and rejected on stdio entries
 - Multiple simultaneous server connections
 - Dynamic capability discovery (tools, resources, prompts)
 
@@ -186,14 +189,18 @@ an OpenAI-compatible `/v1/chat/completions` endpoint. The provider module adds:
 - A 502 from the proxy classifies as `ModelNotLoaded` with a
   `Run: just load <id>` hint (referring to the *trt-llm-explore* justfile)
 
-#### RAG Client *(future — Phase 5)*
+#### RAG Client *(shipped — Phase 5.5 / sprint 010)*
 
-Will connect to a RAG service on the local network:
+Retrieval is the **klams** memory service on kubs0, consumed over
+authenticated MCP — not a service built here:
 
-- Embedding generation (local via Candle/Ollama or remote)
-- Vector store queries (Qdrant, LanceDB)
-- Document ingestion pipeline
-- Exposed as an MCP server for the controller to consume
+- klams owns embeddings (HF TEI), the vector store (Qdrant), chunking, and
+  ingestion (its filesystem scanner); m-v never embeds or stores
+- m-v calls `memory_search` (read-only this sprint, `Read`-scoped token); it
+  merges into the agent tool set and is reachable from workflow `tool` steps
+- Bearer auth via `auth_token_env` on the HTTP MCP entry
+- See [08-rag-integration.md](08-rag-integration.md) and the pinned tool
+  contract in `specs/010-klams-rag/contracts/`
 
 #### External Services
 
@@ -323,7 +330,7 @@ multae-viae/
 └── workflows/              # Example workflow YAML files
 ```
 
-## Current Implementation (through Sprint 009)
+## Current Implementation (through Sprint 010)
 
 The CLI operates as an agentic system with built-in tools (Sprint 003). The
 architecture uses Rig's native multi-turn agent loop — tools are registered with
@@ -359,6 +366,15 @@ Subsequent sprints layered on:
   spans. New DSL steps `branch` (minijinja-expression condition, maybe-defined
   validation) and `parallel` (fork-join, snapshot isolation, disjoint outputs).
   New `MvError` variants (`AllModelsFailed`, `WorkflowParallelFailed`).
+- **Sprint 010 — RAG via klams**: bearer auth for HTTP MCP servers
+  (`auth_token_env` → `Authorization` header, secret kept out of
+  config/logs/traces, HTTP-only). Retrieval is served by the **klams** memory
+  service on kubs0 over authenticated MCP — `memory_search` merges into the
+  tool set (read-only this sprint); workflows retrieve via a `tool` step
+  (`workflows/examples/rag-example.yaml`). No vector store, embedding, or RAG
+  server is built here — klams owns that behind the contract in
+  `specs/010-klams-rag/contracts/`. Tested hermetically against a fake klams
+  MCP server; live round-trips behind `just test-klams`.
 
 ### Tool Architecture
 
