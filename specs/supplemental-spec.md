@@ -16,9 +16,14 @@ updated.
 | Date | Change | Rationale | Commit |
 |------|--------|-----------|--------|
 | 2026-06-12 | `default-run = "mv-cli"` in `crates/mv-cli/Cargo.toml` | The `fake_mcp_server` test fixture (added sprint 008) is a second bin target, making `cargo run -p mv-cli` / `just run` ambiguous. Pin the real CLI as the default-run target. | `3e39a3b` |
-| 2026-06-12 | `models.yaml` default model `qwen3:8b` → `qwen3-coder:30b` | While verifying `just run`, `qwen3:8b`'s Ollama runner crashed on this host (`llama runner process has terminated`); `qwen3-coder:30b` runs cleanly. Repoint the registry default so the no-`-m` path works out of the box. (Host-specific model choice — adjust as needed.) | _next-sprint roll-in_ |
+| 2026-06-12 | `models.yaml` default model `qwen3:8b` → `qwen3-coder:30b` | While verifying `just run`, `qwen3:8b`'s Ollama runner crashed on this host (`llama runner process has terminated`); `qwen3-coder:30b` runs cleanly. Repoint the registry default so the no-`-m` path works out of the box. (Host-specific model choice — adjust as needed.) | shipped in the sprint 012 PR |
 
-## Deferred to sprint 012
+## Resolved in sprint 012
+
+- **Backend-error misclassification** (below) — fixed in sprint 012 WS1 as
+  `MvError::BackendErrorResponse` (truthful, fallback-eligible; the bare
+  `"HttpError"` substring no longer implies unreachable). See
+  `specs/012-dsl-completion/`.
 
 - **Backend-error misclassification.** A model backend that *responds* with an
   HTTP error status is reported as `BackendUnreachable` ("Is Ollama running?")
@@ -36,12 +41,12 @@ updated.
   reasonable reason to fall back). Touches the shared classifier + its tests +
   the fallback taxonomy, so it is sprint work, not an ad-hoc patch.
 
-## Branch rollup note
+## Branch rollup note (closed)
 
-The `default-run` + `models.yaml`-default commits live on the **`fix-default-run`**
-branch and are intentionally **not** shipped via their own PR. Plan: branch
-**`012-*`** off `fix-default-run` (so 012 carries these commits forward), fix
-the misclassification there, and ship one 012 PR. After that PR merges, delete
-**both** local branches (`fix-default-run` and `012-*`); the squash-merge on
-`main` is the single record. The commit refs above therefore point at the
-`fix-default-run` branch commits (reachable until cleanup), not a `main` hash.
+The `default-run` + `models.yaml`-default commits originated on the
+**`fix-default-run`** branch and were **not** shipped via their own PR. As
+planned, **`012-dsl-completion`** branched off `fix-default-run` (carrying
+those commits forward), fixed the misclassification, and shipped everything in
+one sprint-012 PR. On merge, both local branches (`fix-default-run` and
+`012-dsl-completion`) are deleted; the squash-merge on `main` is the single
+record (the `3e39a3b` ref above was the pre-squash branch commit).
