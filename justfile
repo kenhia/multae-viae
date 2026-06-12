@@ -1,5 +1,9 @@
 # justfile for multae-viae
 
+set dotenv-load := true
+set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
+# set positional-arguments
+
 # Build all workspace crates
 build:
     cargo build --workspace

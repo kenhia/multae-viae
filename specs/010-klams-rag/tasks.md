@@ -87,8 +87,9 @@ answered with data.
   default `http://kubs0:7777/mcp`, `KLAMS_TOKEN` required; `KLAMS_MODEL` gates
   the agentic one): model-free workflow retrieval + agentic round-trip; both
   early-return when `KLAMS_TOKEN` is unset so the `--ignored` sweep stays
-  green. `just test-klams` recipe added (FR-007, SC-006). *Prerequisite
-  (user): mint Read token on kubs0 — pending live run.*
+  green. `just test-klams` recipe added (FR-007, SC-006). *Verified live
+  2026-06-12: both round-trips passed against the real klams on kubs0
+  (token via `.env`, loaded by `set dotenv-load` in the justfile).*
 
 **Checkpoint**: failure modes proven; live path runnable on demand.
 
