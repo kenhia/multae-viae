@@ -115,17 +115,17 @@ over HTTP; `just ci` green offline.
   concrete agent types; agent-building factored out of `complete()`
   (build once / prompt many); one-shot path re-expressed as build + single
   prompt — CLI e2e still unmodified (FR-006, SC-006)
-- [ ] T020 [WS4] Failing tests → session endpoints: `POST /v1/sessions`
+- [X] T020 [WS4] Failing tests → session endpoints: `POST /v1/sessions`
   (201; duplicate name 409), `GET /v1/sessions`, `DELETE
   /v1/sessions/{name}` (drops agent, klams data retained), unknown-session
   turn 404 with create hint (FR-004, FR-006)
-- [ ] T021 [WS4] Failing test → `POST /v1/sessions/{name}/turns`: held
+- [X] T021 [WS4] Failing test → `POST /v1/sessions/{name}/turns`: held
   agent carries context across turns (hermetic two-turn via fake proxy);
   per-session mutex serializes concurrent turns (FR-006, SC-003)
-- [ ] T022 [WS4] Wire `SessionMemory<KlamsMemory>` into the session
+- [X] T022 [WS4] Wire `SessionMemory<KlamsMemory>` into the session
   lifecycle (record on turn, recall on create-by-existing-name) — same
   seam as CLI `--session` (FR-006)
-- [ ] T023 [WS4] Live `#[ignore]` test under `just test-klams`: record
+- [X] T023 [WS4] Live `#[ignore]` test under `just test-klams`: record
   turns, drop state, recreate session by name, prior context recalled
   (SC-003)
 

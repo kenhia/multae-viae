@@ -221,7 +221,11 @@ impl McpManager {
     /// All servers are cancelled at once (`join_all`); each cancel is wrapped
     /// in [`SHUTDOWN_TIMEOUT`], so a server that hangs on shutdown is abandoned
     /// rather than allowed to wedge process exit.
-    pub async fn shutdown(self) {
+    ///
+    /// Takes `&self` (it drains the internal connection map) so a daemon holding
+    /// the manager behind an `Arc` can shut it down at exit. Idempotent: a
+    /// second call finds the map already drained and returns immediately.
+    pub async fn shutdown(&self) {
         let conns: Vec<McpConnection> = {
             let mut guard = self.connections.lock().await;
             guard.drain().map(|(_, c)| c).collect()

@@ -6,6 +6,7 @@
 //! handle (built-ins + MCP), the MCP lifecycle manager, and the directory
 //! workflow files resolve against.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -13,6 +14,14 @@ use mv_core::ModelRegistry;
 use mv_core::MvError;
 use mv_core::mcp::manager::McpManager;
 use rig::tool::server::{ToolServer, ToolServerHandle};
+use tokio::sync::Mutex;
+
+use crate::session::Session;
+
+/// Held-open sessions, keyed by name. The outer mutex guards the map
+/// (create/list/delete); each session has its own inner mutex so turns within
+/// a session serialize while different sessions run concurrently.
+pub type SessionMap = Arc<Mutex<HashMap<String, Arc<Mutex<Session>>>>>;
 
 /// Process-wide state shared across handlers.
 #[derive(Clone)]
@@ -26,6 +35,8 @@ pub struct AppState {
     /// Directory that `POST /v1/workflows/run` resolves workflow names against;
     /// requests cannot escape it (see the path-boundary check in handlers).
     pub workflows_dir: PathBuf,
+    /// Held-open conversation sessions.
+    pub sessions: SessionMap,
 }
 
 /// Build the agent tool handle with the built-in tools attached — the same set
@@ -56,6 +67,7 @@ impl AppState {
             agent_handle,
             mcp: Arc::new(mcp),
             workflows_dir,
+            sessions: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 }

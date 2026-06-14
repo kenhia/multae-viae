@@ -12,11 +12,12 @@
 
 pub mod error;
 pub mod handlers;
+pub mod session;
 pub mod state;
 pub mod telemetry;
 
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use tower_http::trace::TraceLayer;
 
 pub use state::AppState;
@@ -33,6 +34,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/models", get(handlers::list_models))
         .route("/v1/prompt", post(handlers::prompt))
         .route("/v1/workflows/run", post(handlers::run_workflow))
+        .route(
+            "/v1/sessions",
+            post(session::create_session).get(session::list_sessions),
+        )
+        .route("/v1/sessions/{name}", delete(session::delete_session))
+        .route("/v1/sessions/{name}/turns", post(session::session_turn))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

@@ -27,15 +27,31 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    /// A server-native `400 Bad Request` (e.g. a malformed request or a
-    /// path-boundary violation) that does not originate from an `MvError`.
-    pub fn bad_request(code: &'static str, message: impl Into<String>) -> Self {
+    /// A server-native error with an explicit status and code (no `MvError`).
+    pub fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
         Self {
-            status: StatusCode::BAD_REQUEST,
+            status,
             code,
             message: message.into(),
             hint: None,
         }
+    }
+
+    /// A server-native `400 Bad Request` (e.g. a malformed request or a
+    /// path-boundary violation) that does not originate from an `MvError`.
+    pub fn bad_request(code: &'static str, message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, code, message)
+    }
+
+    /// A server-native `404 Not Found` (e.g. an unknown session name).
+    pub fn not_found(code: &'static str, message: impl Into<String>) -> Self {
+        Self::new(StatusCode::NOT_FOUND, code, message)
+    }
+
+    /// A server-native `409 Conflict` (e.g. creating a session whose name is
+    /// already taken).
+    pub fn conflict(code: &'static str, message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, code, message)
     }
 }
 

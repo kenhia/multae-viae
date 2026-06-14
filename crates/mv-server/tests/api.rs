@@ -245,3 +245,243 @@ async fn workflow_runs_a_tool_only_flow() {
         "listing should be non-empty: {listing}"
     );
 }
+
+// --- Sessions (WS4) ---
+
+#[tokio::test]
+async fn session_lifecycle_create_list_delete() {
+    let (state, _dir) = state_builtin().await;
+    let router = || build_router(state.clone());
+
+    // Create.
+    let resp = router()
+        .oneshot(post("/v1/sessions", json!({"name": "research"})))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = body_json(resp).await;
+    assert_eq!(body["name"], "research");
+
+    // Duplicate name → 409.
+    let resp = router()
+        .oneshot(post("/v1/sessions", json!({"name": "research"})))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    assert_eq!(body_json(resp).await["error"]["code"], "SESSION_EXISTS");
+
+    // List shows it.
+    let resp = router().oneshot(get("/v1/sessions")).await.unwrap();
+    let body = body_json(resp).await;
+    assert!(
+        body["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["name"] == "research")
+    );
+
+    // Delete → 204, then a turn on it 404s.
+    let resp = router()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/v1/sessions/research")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn turn_on_unknown_session_is_404() {
+    let (state, _dir) = state_builtin().await;
+    let resp = build_router(state)
+        .oneshot(post("/v1/sessions/ghost/turns", json!({"prompt": "hi"})))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(body_json(resp).await["error"]["code"], "SESSION_NOT_FOUND");
+}
+
+#[tokio::test]
+async fn session_turns_carry_context() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/health"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("OK"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "data": [{"id": "served-x", "object": "model"}],
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "c1",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "served-x",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "ack"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })))
+        .mount(&server)
+        .await;
+
+    let registry = trtllm_registry(&format!("{}/v1", server.uri()), "served-x");
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::build(registry, None, dir.path().to_path_buf())
+        .await
+        .unwrap();
+    let router = || build_router(state.clone());
+
+    router()
+        .oneshot(post("/v1/sessions", json!({"name": "s1"})))
+        .await
+        .unwrap();
+
+    // Turn 1 establishes a fact.
+    let resp = router()
+        .oneshot(post(
+            "/v1/sessions/s1/turns",
+            json!({"prompt": "My name is Ken"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "{:?}", resp);
+
+    // Turn 2: the second backend request must carry the first turn in history.
+    let resp = router()
+        .oneshot(post(
+            "/v1/sessions/s1/turns",
+            json!({"prompt": "What is my name?"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // The last chat/completions request body should include the prior turn —
+    // proof the held agent carried conversation context across turns.
+    let chat_reqs: Vec<_> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.url.path() == "/v1/chat/completions")
+        .collect();
+    let last = chat_reqs.last().expect("a chat request was made");
+    let body = String::from_utf8_lossy(&last.body);
+    assert!(
+        body.contains("My name is Ken"),
+        "second turn must include prior history; body: {body}"
+    );
+}
+
+/// Live restart-recovery (SC-003): a session recorded to klams is recoverable
+/// by name after the server state is rebuilt. `#[ignore]`d — requires a
+/// reachable klams (`KLAMS_TOKEN`, URL via `KLAMS_URL`) and a model backend
+/// (`KLAMS_MODEL`); run via `just test-klams`. Skips cleanly when unconfigured.
+#[tokio::test]
+#[ignore = "requires a reachable klams (KLAMS_TOKEN) and a model backend (KLAMS_MODEL)"]
+async fn session_restart_recovery_live() {
+    let Ok(_token) = std::env::var("KLAMS_TOKEN") else {
+        eprintln!("skipping: KLAMS_TOKEN not set");
+        return;
+    };
+    let Ok(model) = std::env::var("KLAMS_MODEL") else {
+        eprintln!("skipping: KLAMS_MODEL not set");
+        return;
+    };
+    let klams_url =
+        std::env::var("KLAMS_URL").unwrap_or_else(|_| "http://kubs0:7777/mcp".to_string());
+
+    let dir = tempfile::tempdir().unwrap();
+    // models.yaml: rely on the project default registry by id; write a minimal
+    // ollama entry so the named model resolves to a local backend.
+    let models = dir.path().join("models.yaml");
+    std::fs::write(
+        &models,
+        format!("models:\n  - id: {model}\n    provider: ollama\n    default: true\n"),
+    )
+    .unwrap();
+    let mcp = dir.path().join("mcp-servers.yaml");
+    std::fs::write(
+        &mcp,
+        format!(
+            "servers:\n  - name: klams\n    transport: http\n    url: {klams_url}\n    auth_token_env: KLAMS_TOKEN\n"
+        ),
+    )
+    .unwrap();
+
+    let session_name = "mv-server-restart-test";
+    let secret = "the-secret-is-BLUEFISH";
+
+    // First "boot": create the session, record a fact.
+    {
+        let registry = mv_core::ModelRegistry::load(&models).unwrap();
+        let state = AppState::build(
+            registry,
+            Some(mcp.to_str().unwrap()),
+            dir.path().to_path_buf(),
+        )
+        .await
+        .unwrap();
+        let router = || build_router(state.clone());
+        router()
+            .oneshot(post("/v1/sessions", json!({"name": session_name})))
+            .await
+            .unwrap();
+        let resp = router()
+            .oneshot(post(
+                &format!("/v1/sessions/{session_name}/turns"),
+                json!({"prompt": format!("Please remember this for later: {secret}.")}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        state.mcp.shutdown().await;
+    }
+
+    // Second "boot": fresh state (the held session is gone). Recreate by name;
+    // the first turn should recall the recorded fact from klams.
+    {
+        let registry = mv_core::ModelRegistry::load(&models).unwrap();
+        let state = AppState::build(
+            registry,
+            Some(mcp.to_str().unwrap()),
+            dir.path().to_path_buf(),
+        )
+        .await
+        .unwrap();
+        let router = || build_router(state.clone());
+        router()
+            .oneshot(post("/v1/sessions", json!({"name": session_name})))
+            .await
+            .unwrap();
+        let resp = router()
+            .oneshot(post(
+                &format!("/v1/sessions/{session_name}/turns"),
+                json!({"prompt": "What was the secret I asked you to remember?"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let answer = body["response"].as_str().unwrap_or_default();
+        assert!(
+            answer.to_lowercase().contains("bluefish"),
+            "recalled answer should mention the secret; got: {answer}"
+        );
+    }
+}
