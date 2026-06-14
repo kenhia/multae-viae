@@ -56,17 +56,17 @@ unchanged; every error has a code; `just ci` green.
 - [X] T007 [P] [WS2] `tools/file_read.rs` + `tools/file_list.rs` switch
   `std::fs` → `tokio::fs` (bodies only; they are already async Rig tools);
   existing tool tests keep passing (FR-009)
-- [ ] T008 [WS2] `McpManager` in `crates/mv-core/src/mcp/`: owns the
+- [X] T008 [WS2] `McpManager` in `crates/mv-core/src/mcp/`: owns the
   connections, exposes the merged tool set, per-server state
   (healthy/reconnecting/dead). Failing test: tool dispatch through a dead
   server yields a tool-level error, not a panic (FR-008)
-- [ ] T009 [WS2] Reconnect with exponential backoff (cap + reset on
+- [X] T009 [WS2] Reconnect with exponential backoff (cap + reset on
   success), republish tools on reconnect; test with `fake_mcp_server`
   killed and restarted, backoff constants injected short (FR-008)
-- [ ] T010 [WS2] Shutdown: concurrent `join_all` over per-server shutdowns,
+- [X] T010 [WS2] Shutdown: concurrent `join_all` over per-server shutdowns,
   each under a timeout; test that a hanging server cannot extend shutdown
   past its budget (FR-008, SC-005)
-- [ ] T011 [WS2] CLI switches to `McpManager` one-shot mode
+- [X] T011 [WS2] CLI switches to `McpManager` one-shot mode
   (connect → use → shutdown); delete the superseded `shutdown_all` path;
   cross-server name collisions log a warning (namespacing deferred — note
   in docs) (FR-008)

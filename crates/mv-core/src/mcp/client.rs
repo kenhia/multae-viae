@@ -3,10 +3,10 @@ use rig::tool::server::ToolServerHandle;
 use rmcp::model::{ClientCapabilities, ClientInfo, Implementation};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::TokioChildProcess;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::MvError;
-use crate::mcp::config::{McpServerConfig, McpServersConfig, McpTransportType};
+use crate::mcp::config::{McpServerConfig, McpTransportType};
 
 /// A running MCP server connection. Drop this to shut down the connection.
 pub struct McpConnection {
@@ -32,6 +32,26 @@ impl McpConnection {
         if let Err(e) = self.service.cancel().await {
             warn!(server = %self.name, error = ?e, "error during MCP shutdown");
         }
+    }
+
+    /// Whether the underlying transport is still open. A `false` here is the
+    /// daemon's signal to reconnect — a stdio child that crashed or an HTTP
+    /// peer that closed the stream closes the service. Cheap and non-blocking;
+    /// safe to poll from a health-monitor loop.
+    pub fn is_alive(&self) -> bool {
+        !self.service.is_closed()
+    }
+}
+
+/// Connect to one MCP server, dispatching on its transport. The single
+/// connect entry point used by both bulk connect and reconnect.
+pub async fn connect_one(
+    config: &McpServerConfig,
+    handle: ToolServerHandle,
+) -> Result<McpConnection, MvError> {
+    match config.transport {
+        McpTransportType::Stdio => connect_stdio(config, handle).await,
+        McpTransportType::Http => connect_http(config, handle).await,
     }
 }
 
@@ -173,42 +193,9 @@ pub async fn connect_http(
     })
 }
 
-/// Connect to all configured MCP servers. Failures are logged and skipped.
-#[tracing::instrument(skip(handle), fields(mcp.server.count = config.servers.len()))]
-pub async fn connect_all_servers(
-    config: &McpServersConfig,
-    handle: ToolServerHandle,
-) -> Vec<McpConnection> {
-    let mut connections = Vec::new();
-
-    for server in &config.servers {
-        let result = match server.transport {
-            McpTransportType::Stdio => connect_stdio(server, handle.clone()).await,
-            McpTransportType::Http => connect_http(server, handle.clone()).await,
-        };
-
-        match result {
-            Ok(conn) => {
-                debug!(server = %conn.name, transport = ?conn.transport_type, "MCP server ready");
-                connections.push(conn);
-            }
-            Err(e) => {
-                warn!(server = %server.name, error = %e, "MCP server failed to connect");
-            }
-        }
-    }
-
-    info!(count = connections.len(), "MCP servers connected");
-    connections
-}
-
-/// Gracefully shut down all MCP connections.
-#[tracing::instrument(skip(connections), fields(mcp.shutdown.count = connections.len()))]
-pub async fn shutdown_all(connections: Vec<McpConnection>) {
-    for conn in connections {
-        conn.shutdown().await;
-    }
-}
+// Bulk connect and shutdown now live in `mcp::manager::McpManager`, the single
+// MCP lifecycle owner (one-shot for the CLI, keep-alive + reconnect for the
+// daemon). `connect_one` above is the shared per-server connect primitive.
 
 #[cfg(test)]
 mod tests {
@@ -348,36 +335,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn connect_all_skips_failures() {
-        let handle = ToolServer::new().run();
-        let config = McpServersConfig {
-            servers: vec![
-                McpServerConfig {
-                    name: "fail1".to_string(),
-                    transport: McpTransportType::Stdio,
-                    command: Some("/nonexistent".to_string()),
-                    args: vec![],
-                    env: HashMap::new(),
-                    url: None,
-                    auth_token_env: None,
-                },
-                McpServerConfig {
-                    name: "fail2".to_string(),
-                    transport: McpTransportType::Stdio,
-                    command: None,
-                    args: vec![],
-                    env: HashMap::new(),
-                    url: None,
-                    auth_token_env: None,
-                },
-            ],
-        };
-
-        let connections = connect_all_servers(&config, handle).await;
-        assert!(
-            connections.is_empty(),
-            "both servers should fail gracefully"
-        );
-    }
+    // Bulk connect/skip-on-failure is now exercised by
+    // `mcp::manager::tests::failed_servers_are_skipped_not_fatal`.
 }
