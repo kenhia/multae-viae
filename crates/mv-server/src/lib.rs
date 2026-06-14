@@ -12,6 +12,7 @@
 
 pub mod error;
 pub mod handlers;
+pub mod scheduler;
 pub mod session;
 pub mod state;
 pub mod telemetry;

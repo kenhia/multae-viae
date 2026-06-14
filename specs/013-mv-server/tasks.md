@@ -136,21 +136,21 @@ restart recovery proven live; `just ci` green.
 
 ## Phase 5: WS5 — Scheduler, shutdown, operations, docs
 
-- [ ] T024 [WS5] Schedules file parsing + validation (croner): boot fails
+- [X] T024 [WS5] Schedules file parsing + validation (croner): boot fails
   on invalid cron/missing workflow with an actionable error naming the
   entry; failing test first (FR-007)
-- [ ] T025 [WS5] Scheduler loop: per-schedule Tokio task,
+- [X] T025 [WS5] Scheduler loop: per-schedule Tokio task,
   sleep-until-next-fire, run via the same engine call as the API handler;
   skip-and-log on overlap. Hermetic test: near-term schedule fires a
   trivial workflow; overlapping tick skipped (FR-007, SC-004)
-- [ ] T026 [P] [WS5] Example `examples/schedules.yaml` + workflow
+- [X] T026 [P] [WS5] Example `examples/schedules.yaml` + workflow
   summarizing recent klams-monitor events via `event_search` (the roadmap
   "consumes klams-monitor events" deliverable, as configuration) (FR-007)
-- [ ] T027 [WS5] Graceful shutdown: `tokio::signal` +
+- [X] T027 [WS5] Graceful shutdown: `tokio::signal` +
   `with_graceful_shutdown`; order = stop accepting → drain (bounded) →
   scheduler stop → MCP manager shutdown → telemetry flush → exit 0. Test:
   SIGTERM with in-flight request completes it and exits 0 (FR-010, SC-005)
-- [ ] T028 [P] [WS5] Operations: `just serve` recipe; sample systemd unit
+- [X] T028 [P] [WS5] Operations: `just serve` recipe; sample systemd unit
   in docs (FR-013)
 - [ ] T029 [WS5] `docs/12-mv-server.md`: API reference (endpoints, error
   envelope + codes, status mapping), config flags, schedules format,

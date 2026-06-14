@@ -143,7 +143,10 @@ pub struct WorkflowResponse {
 /// Resolve a caller-supplied workflow name strictly inside `root`. Rejects any
 /// name that is absolute or contains a `..` / root / prefix component, before
 /// any file is opened (FR-011). Returns the joined path on success.
-fn resolve_workflow_path(root: &std::path::Path, name: &str) -> Result<PathBuf, ApiError> {
+pub(crate) fn resolve_workflow_path(
+    root: &std::path::Path,
+    name: &str,
+) -> Result<PathBuf, ApiError> {
     let candidate = std::path::Path::new(name);
     let escapes = candidate.components().any(|c| {
         matches!(
@@ -163,7 +166,9 @@ fn resolve_workflow_path(root: &std::path::Path, name: &str) -> Result<PathBuf, 
 /// Coerce JSON inputs to the engine's `String` context values (CLI inputs are
 /// strings too): a string passes through verbatim; anything else uses its
 /// compact JSON form, so `{"n": 5}` becomes `"5"`.
-fn stringify_inputs(inputs: HashMap<String, serde_json::Value>) -> HashMap<String, String> {
+pub(crate) fn stringify_inputs(
+    inputs: HashMap<String, serde_json::Value>,
+) -> HashMap<String, String> {
     inputs
         .into_iter()
         .map(|(k, v)| {
@@ -181,8 +186,21 @@ pub async fn run_workflow(
     Json(req): Json<WorkflowRequest>,
 ) -> Result<Json<WorkflowResponse>, ApiError> {
     let path = resolve_workflow_path(&state.workflows_dir, &req.workflow)?;
+    let (workflow, outputs) = run_workflow_at(&state, &path, stringify_inputs(req.inputs)).await?;
+    Ok(Json(WorkflowResponse { workflow, outputs }))
+}
 
-    let workflow = mv_core::workflow::parser::load_from_file(&path)?;
+/// Load, validate, and execute the workflow at `path` against `state`'s
+/// runtime, returning `(workflow_name, outputs)`. The shared core behind both
+/// the HTTP handler and the scheduler — validation and model-reference checks
+/// (a typo'd model fails before execution) live here so both paths behave
+/// identically. `path` is assumed already resolved inside the workflows dir.
+pub async fn run_workflow_at(
+    state: &AppState,
+    path: &std::path::Path,
+    inputs: HashMap<String, String>,
+) -> Result<(String, HashMap<String, serde_json::Value>), mv_core::MvError> {
+    let workflow = mv_core::workflow::parser::load_from_file(path)?;
 
     let validation_errors =
         mv_core::workflow::validate::validate(&workflow, Some(&state.workflows_dir));
@@ -192,18 +210,15 @@ pub async fn run_workflow(
             .map(|e| format!("  - {e}"))
             .collect::<Vec<_>>()
             .join("\n");
-        return Err(mv_core::MvError::WorkflowValidationError { details }.into());
+        return Err(mv_core::MvError::WorkflowValidationError { details });
     }
 
-    // Validate model references up front (same as the CLI): a typo'd model
-    // fails before execution rather than mid-run.
     for (_step_id, model_id) in workflow.model_references() {
         if state.registry.get(&model_id).is_none() {
             return Err(mv_core::MvError::ModelNotInRegistry {
                 model: model_id,
                 available: state.registry.available_ids().join(", "),
-            }
-            .into());
+            });
         }
     }
 
@@ -218,7 +233,7 @@ pub async fn run_workflow(
 
     let result = mv_core::workflow::engine::execute_workflow(
         &workflow,
-        stringify_inputs(req.inputs),
+        inputs,
         &prompt_exec,
         &tool_exec,
         &state.workflows_dir,
@@ -226,10 +241,7 @@ pub async fn run_workflow(
     )
     .await?;
 
-    Ok(Json(WorkflowResponse {
-        workflow: workflow.name,
-        outputs: result.outputs,
-    }))
+    Ok((workflow.name, result.outputs))
 }
 
 #[cfg(test)]

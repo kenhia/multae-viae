@@ -1,0 +1,24 @@
+# Example schedules file for mv-server.
+#
+#   mv-server --workflows-dir workflows/examples \
+#             --schedules   workflows/examples/schedules.yaml \
+#             --mcp-servers mcp-servers.yaml
+#
+# Each entry maps a cron expression to a workflow run. Workflow names resolve
+# inside --workflows-dir (a name with `..` or an absolute path is rejected at
+# boot). Cron is standard 5-field, or 6-field with a leading seconds column.
+# Overlap policy is skip-and-log: if a run is still in flight when the next tick
+# arrives, the tick is skipped — runs never stack.
+
+schedules:
+  # Every 15 minutes, digest recent klams-monitor events.
+  - name: monitor-digest
+    cron: "*/15 * * * *"
+    workflow: monitor-summary.yaml
+
+  # Top of every hour, with explicit inputs passed to the workflow.
+  - name: hourly-report
+    cron: "0 * * * *"
+    workflow: monitor-summary.yaml
+    inputs:
+      window: "1h"

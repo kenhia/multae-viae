@@ -26,6 +26,9 @@ opentelemetry = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 opentelemetry-otlp = "0.31"
 tracing-opentelemetry = "0.32"
+croner = "3"
+chrono = "0.4"
+serde_yml = "0.0.12"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

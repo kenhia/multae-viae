@@ -388,6 +388,51 @@ async fn session_turns_carry_context() {
     );
 }
 
+#[tokio::test]
+async fn scheduler_fires_a_workflow() {
+    let dir = tempfile::tempdir().unwrap();
+    let sentinel = dir.path().join("fired.txt");
+    // A backend-free workflow that touches a sentinel via the shell_exec tool,
+    // so firing is observable without a model.
+    let wf = format!(
+        "name: touch\nversion: \"1.0\"\ndescription: t\n\nsteps:\n  - id: s\n    name: s\n    type: tool\n    output: o\n    tool: shell_exec\n    inputs:\n      command: \"touch {}\"\n\noutputs:\n  - name: o\n    from: s\n",
+        sentinel.display()
+    );
+    std::fs::write(dir.path().join("touch.yaml"), wf).unwrap();
+    // Every second.
+    std::fs::write(
+        dir.path().join("schedules.yaml"),
+        "schedules:\n  - cron: \"* * * * * *\"\n    workflow: touch.yaml\n",
+    )
+    .unwrap();
+
+    let state = AppState::build(
+        mv_core::ModelRegistry::built_in(),
+        None,
+        dir.path().to_path_buf(),
+    )
+    .await
+    .unwrap();
+    let scheds =
+        mv_server::scheduler::load_schedules(&dir.path().join("schedules.yaml"), dir.path())
+            .unwrap();
+    let handles = mv_server::scheduler::spawn(state, scheds);
+
+    // Within a few ticks the sentinel should appear.
+    let mut fired = false;
+    for _ in 0..30 {
+        if sentinel.exists() {
+            fired = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    for h in handles {
+        h.abort();
+    }
+    assert!(fired, "scheduled workflow should have fired within ~3s");
+}
+
 /// Live restart-recovery (SC-003): a session recorded to klams is recoverable
 /// by name after the server state is rebuilt. `#[ignore]`d — requires a
 /// reachable klams (`KLAMS_TOKEN`, URL via `KLAMS_URL`) and a model backend
