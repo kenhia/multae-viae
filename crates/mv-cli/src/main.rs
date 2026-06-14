@@ -30,8 +30,15 @@ fn print_error(err: &mv_core::MvError, json: bool) {
     // channel, so `mv-cli --json ... | jq .response` never sees an error
     // object on the success stream.
     if json {
-        let obj = serde_json::json!({ "error": err.to_string() });
-        eprintln!("{}", obj);
+        // `code` is a stable machine-readable discriminant (additive — the
+        // human-readable `error` string is unchanged); callers can branch on
+        // it instead of matching error prose. Same code the mv-server envelope
+        // uses (`mv_core::MvError::code`). `error` is kept first so the existing
+        // envelope shape (and assertions on it) are unchanged — `code` is
+        // strictly appended (serde_json::json! would sort the keys instead).
+        let message = serde_json::Value::String(err.to_string());
+        let code = serde_json::Value::String(err.code().to_string());
+        eprintln!(r#"{{"error":{message},"code":{code}}}"#);
     } else {
         eprintln!("Error: {err}");
     }

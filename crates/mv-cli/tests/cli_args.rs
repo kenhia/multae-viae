@@ -170,6 +170,9 @@ fn json_error_goes_to_stderr_not_stdout() {
         .code(1)
         .stderr(predicate::str::contains(r#"{"error""#))
         .stderr(predicate::str::contains("Config file not found"))
+        // 013/WS1: the --json error envelope carries a stable machine code
+        // additively alongside the unchanged human-readable message.
+        .stderr(predicate::str::contains(r#""code":"CONFIG_NOT_FOUND""#))
         .stdout(predicate::str::is_empty());
 }
 
