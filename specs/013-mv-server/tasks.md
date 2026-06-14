@@ -101,7 +101,7 @@ clients in steady-state paths; `just ci` green.
 - [X] T017 [P] [WS3] Path boundary: workflow names resolve strictly inside
   `--workflows-dir`; failing test with `../` rejected `400` before any
   file I/O (FR-011)
-- [ ] T018 [P] [WS3] Telemetry: HTTP server spans wrapping the existing
+- [X] T018 [P] [WS3] Telemetry: HTTP server spans wrapping the existing
   `gen_ai.*` spans; `--otlp` exporter wiring mirrors the CLI's (FR-012)
 
 **Checkpoint**: one-shot API complete and hermetic; error taxonomy pinned

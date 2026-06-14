@@ -30,17 +30,18 @@ struct Cli {
     /// Directory workflow names in `POST /v1/workflows/run` resolve against.
     #[arg(long, default_value = ".")]
     workflows_dir: PathBuf,
+
+    /// Export OpenTelemetry spans to this OTLP/HTTP collector
+    /// (default `http://localhost:4318` when the flag is given without a value).
+    #[arg(long, num_args = 0..=1, default_missing_value = "http://localhost:4318")]
+    otlp: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
-
     let cli = Cli::parse();
+
+    mv_server::telemetry::init_tracing(cli.otlp.as_deref());
 
     let registry = mv_core::ModelRegistry::resolve(cli.models.as_deref())?;
     let state = AppState::build(registry, cli.mcp_servers.as_deref(), cli.workflows_dir).await?;
@@ -54,6 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
+    mv_server::telemetry::shutdown_tracing();
     info!("mv-server stopped");
     Ok(())
 }

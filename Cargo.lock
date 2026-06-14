@@ -1389,13 +1389,18 @@ dependencies = [
  "clap",
  "http-body-util",
  "mv-core",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
  "rig-core",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "tower",
+ "tower-http",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "wiremock",
 ]
@@ -2802,6 +2807,7 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
