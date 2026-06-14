@@ -15,21 +15,16 @@ pub async fn http_get(url: String) -> Result<String, ToolError> {
     super::tool_policy()
         .check_url(&url)
         .map_err(|e| ToolError::ToolCallError(e.into()))?;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS))
-        .build()
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-            format!("Failed to create HTTP client: {e}").into()
-        })?;
 
-    let response =
-        client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                format!("HTTP request to '{url}' failed: {e}").into()
-            })?;
+    // Shared pooled client; the tool's fetch timeout is applied per request.
+    let response = crate::http::client()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS))
+        .send()
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("HTTP request to '{url}' failed: {e}").into()
+        })?;
 
     let status = response.status();
     if !status.is_success() {

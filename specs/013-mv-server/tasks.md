@@ -19,24 +19,24 @@ behavior via the wiremock fake proxy; MCP lifecycle via the
 
 ## Phase 1: WS1 — Runtime sink + error codes
 
-- [ ] T001 [WS1] Move `crates/mv-cli/src/providers.rs` (minus
+- [X] T001 [WS1] Move `crates/mv-cli/src/providers.rs` (minus
   `stream_trtllm` and stdout printing) into `mv-core` as
   `crates/mv-core/src/runtime.rs` (or `runtime/` module): `complete`,
   `complete_with_fallback`, `build_chain`, `complete_chain`, agent
   construction. `mv-cli` imports from `mv_core::runtime`; `stream_trtllm`
   stays in the binary. No behavior change (FR-001)
-- [ ] T002 [WS1] Move `crates/mv-cli/src/executors.rs`
+- [X] T002 [WS1] Move `crates/mv-cli/src/executors.rs`
   (`RigPromptExecutor`, `HandleToolExecutor`) and
   `crates/mv-cli/src/memory.rs` (`KlamsMemory`, `SessionMemory`) into
   `mv-core`, colocated with the traits they implement; unit tests move with
   them (FR-001)
-- [ ] T003 [WS1] Gate: full existing CLI e2e suite passes **unmodified**
+- [X] T003 [WS1] Gate: full existing CLI e2e suite passes **unmodified**
   (`just ci`); any required test edit is investigated before proceeding
   (SC-006)
-- [ ] T004 [P] [WS1] `MvError::code()` in `crates/mv-core/src/lib.rs`:
+- [X] T004 [P] [WS1] `MvError::code()` in `crates/mv-core/src/lib.rs`:
   exhaustive match (no `_` arm), SCREAMING_SNAKE codes for all 30 variants;
   pinned test asserts codes are unique, stable, and non-empty (FR-002)
-- [ ] T005 [P] [WS1] CLI `--json` error envelope gains additive `code`
+- [X] T005 [P] [WS1] CLI `--json` error envelope gains additive `code`
   field; existing envelope assertions extended, not replaced (FR-002,
   SC-006)
 
@@ -47,13 +47,13 @@ unchanged; every error has a code; `just ci` green.
 
 ## Phase 2: WS2 — Daemon pre-work in core
 
-- [ ] T006 [WS2] Shared `reqwest::Client` in `mv-core` (static `OnceLock`
+- [X] T006 [WS2] Shared `reqwest::Client` in `mv-core` (static `OnceLock`
   accessor with the standard timeout knobs); replace per-call builders at
   `trtllm/health.rs:30,93`, `preflight.rs:79`, `tools/http_get.rs:18`; MCP
   per-server clients kept only where per-server headers require them.
   Failing test first where injectable; grep-style review for the rest
   (FR-009, SC-007)
-- [ ] T007 [P] [WS2] `tools/file_read.rs` + `tools/file_list.rs` switch
+- [X] T007 [P] [WS2] `tools/file_read.rs` + `tools/file_list.rs` switch
   `std::fs` → `tokio::fs` (bodies only; they are already async Rig tools);
   existing tool tests keep passing (FR-009)
 - [ ] T008 [WS2] `McpManager` in `crates/mv-core/src/mcp/`: owns the

@@ -3,6 +3,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+pub mod http;
 pub mod mcp;
 pub mod memory;
 pub mod preflight;

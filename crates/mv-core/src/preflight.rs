@@ -76,13 +76,15 @@ async fn preflight_trtllm(
 }
 
 async fn preflight_ollama(endpoint: &str, timeout: Duration) -> PreflightStatus {
-    let client = match reqwest::Client::builder().timeout(timeout).build() {
-        Ok(c) => c,
-        Err(_) => return PreflightStatus::Unknown,
-    };
     // Any HTTP response means the daemon is up; a transport error means it is
     // not. We don't verify the model is pulled — that surfaces at completion.
-    match client.get(endpoint).send().await {
+    // Shared pooled client; the per-probe timeout is applied per request.
+    match crate::http::client()
+        .get(endpoint)
+        .timeout(timeout)
+        .send()
+        .await
+    {
         Ok(_) => PreflightStatus::Healthy,
         Err(e) => PreflightStatus::Dead(MvError::BackendUnreachable {
             endpoint: endpoint.to_string(),
