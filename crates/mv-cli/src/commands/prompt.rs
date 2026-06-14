@@ -5,8 +5,9 @@ use tracing::{debug, info};
 
 use crate::cli::PromptArgs;
 use crate::commands::connect_mcp_servers;
-use crate::providers::{CompletionOutcome, GenParams, complete_with_fallback, stream_trtllm};
+use crate::stream::stream_trtllm;
 use mv_core::Provider;
+use mv_core::runtime::{CompletionOutcome, GenParams, complete_with_fallback};
 
 #[tracing::instrument(name = "mv_cli_request", skip(args), fields(
     prompt = %args.prompt,
@@ -102,8 +103,8 @@ pub async fn run_prompt(
                 client_app: "mv-cli".to_string(),
                 client_version: env!("CARGO_PKG_VERSION").to_string(),
             };
-            match crate::memory::SessionMemory::begin(
-                crate::memory::KlamsMemory::new(agent_handle.clone()),
+            match mv_core::memory::SessionMemory::begin(
+                mv_core::memory::KlamsMemory::new(agent_handle.clone()),
                 meta,
             )
             .await

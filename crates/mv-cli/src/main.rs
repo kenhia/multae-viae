@@ -1,18 +1,17 @@
 //! mv-cli entry point: argument parsing fallback, output contract, and
-//! command dispatch. Provider logic lives in `providers`, executors in
-//! `executors`, telemetry wiring in `telemetry`.
+//! command dispatch. The agent runtime (provider dispatch, executors, memory)
+//! lives in `mv_core::runtime`/`mv_core::memory`; the binary keeps only CLI
+//! concerns — terminal streaming (`stream`) and telemetry wiring (`telemetry`).
 
 mod cli;
 mod commands;
-mod executors;
-mod memory;
-mod providers;
+mod stream;
 mod telemetry;
 
 use clap::Parser;
 
 use cli::{Cli, Commands, WorkflowAction};
-use providers::CompletionOutcome;
+use mv_core::runtime::CompletionOutcome;
 
 fn print_success(outcome: &CompletionOutcome, json: bool) {
     if json {

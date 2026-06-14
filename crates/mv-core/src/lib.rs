@@ -7,6 +7,7 @@ pub mod mcp;
 pub mod memory;
 pub mod preflight;
 pub mod providers;
+pub mod runtime;
 pub mod tools;
 pub mod trtllm;
 pub mod workflow;

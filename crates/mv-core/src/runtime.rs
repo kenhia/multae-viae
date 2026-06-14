@@ -1,16 +1,23 @@
-//! Provider dispatch: the single seam between a resolved `ModelEntry` and a
-//! rig agent call. Both the prompt command and the workflow executor route
-//! through [`complete`]; Phase 5 fallback chains will call it in a loop.
+//! Agent runtime: the single seam between a resolved [`ModelEntry`] and a rig
+//! agent call, plus the concrete workflow executors that bridge the (rig-free)
+//! workflow engine to rig. Both the prompt command and the workflow executor
+//! route buffered completions through [`complete`]; fallback chains call it in
+//! a loop via [`complete_chain`].
+//!
+//! This lives in `mv-core` so every consumer — `mv-cli` and `mv-server` — drives
+//! the same routing, fallback, and tool-dispatch logic. The binary keeps only
+//! its own concerns (CLI parsing, stdout formatting, terminal streaming).
 
 use std::time::Duration;
 
-use mv_core::preflight::{PreflightStatus, preflight};
-use mv_core::providers::{SYSTEM_PREAMBLE, classify_backend_error, classify_prompt_error};
-use mv_core::trtllm::START_HINT;
-use mv_core::{ModelEntry, ModelRegistry, MvError, Provider};
 use rig::completion::Prompt;
 use rig::tool::server::ToolServerHandle;
 use tracing::{Span, debug, info, warn};
+
+use crate::preflight::{PreflightStatus, preflight};
+use crate::providers::{SYSTEM_PREAMBLE, classify_prompt_error};
+use crate::trtllm::START_HINT;
+use crate::{ModelEntry, ModelRegistry, MvError, Provider};
 
 /// Network timeout for a preflight probe — short, so the router never blocks on
 /// a hung host before falling back.
@@ -283,8 +290,9 @@ async fn call_openai(
 }
 
 /// Build the TRT-LLM agent (Chat Completions client, stop sequences,
-/// sampling params). Shared by the buffered and streaming paths.
-fn trtllm_agent(
+/// sampling params). Shared by the buffered path here and the binary's
+/// streaming path (`mv-cli`'s `stream_trtllm`).
+pub fn trtllm_agent(
     entry: &ModelEntry,
     endpoint: &str,
     handle: ToolServerHandle,
@@ -308,7 +316,7 @@ fn trtllm_agent(
         .preamble(SYSTEM_PREAMBLE)
         .tool_server_handle(handle)
         .default_max_turns(entry.effective_max_turns());
-    if let Some(stop_value) = mv_core::trtllm::stop::request_stop_value(entry) {
+    if let Some(stop_value) = crate::trtllm::stop::request_stop_value(entry) {
         builder = builder.additional_params(stop_value);
     }
     Ok(params.apply(builder).build())
@@ -347,7 +355,7 @@ async fn call_trtllm(
         classify_prompt_error(&e, model_name, endpoint, START_HINT, Some(&entry.id))
     })?;
 
-    mv_core::trtllm::usage::Usage::from_counts(
+    crate::trtllm::usage::Usage::from_counts(
         response.usage.input_tokens,
         response.usage.output_tokens,
     )
@@ -356,104 +364,74 @@ async fn call_trtllm(
     Ok(response.output)
 }
 
-#[tracing::instrument(name = "llm_completion", skip(entry, handle), fields(
-    gen_ai.system = "trtllm",
-    gen_ai.request.model = %entry.model_name(),
-    trtllm.architecture = entry.architecture.as_deref().unwrap_or(""),
-    trtllm.quant = entry.quant.as_deref().unwrap_or(""),
-    trtllm.expected_vram_gb = entry.expected_vram_gb.unwrap_or(0),
-    gen_ai.usage.input_tokens = tracing::field::Empty,
-    gen_ai.usage.output_tokens = tracing::field::Empty,
-))]
-pub async fn stream_trtllm(
-    entry: &ModelEntry,
-    endpoint: &str,
-    prompt: &str,
-    handle: ToolServerHandle,
-) -> Result<String, MvError> {
-    use futures_util::StreamExt;
-    use rig::agent::{MultiTurnStreamItem, Text};
-    use rig::streaming::StreamedAssistantContent;
-    use std::io::Write as _;
+/// Prompt executor that routes workflow prompt steps through the shared
+/// provider dispatch seam.
+pub struct RigPromptExecutor {
+    pub registry: ModelRegistry,
+    pub agent_handle: ToolServerHandle,
+}
 
-    // One shared preflight covers both the health check and the served-model
-    // list. The latter matters most on the streaming path: rig's streaming
-    // layer swallows a proxy 502 (logs an SSE parse error, ends the turn
-    // empty), so without it an unloaded model would yield silent empty output
-    // and exit 0. A `Dead` status carries the `just load` / `trtllm-serve` hint.
-    if let PreflightStatus::Dead(e) = preflight(entry, endpoint, PREFLIGHT_TIMEOUT).await {
-        return Err(e);
-    }
-
-    let model_name = entry.model_name();
-    info!(model = %model_name, endpoint = %endpoint, locality = "local", "streaming from TRT-LLM");
-
-    let agent = trtllm_agent(entry, endpoint, handle, &GenParams::default())?;
-
-    info!("sending prompt to model");
-    use rig::streaming::StreamingPrompt as _;
-    let mut response_stream = agent
-        .stream_prompt(prompt)
-        .multi_turn(entry.effective_max_turns())
-        .await;
-
-    let stdout = std::io::stdout();
-    let mut accumulator = String::new();
-    let mut stream_err: Option<MvError> = None;
-
-    loop {
-        let Some(chunk) = response_stream.next().await else {
-            break;
-        };
-        match chunk {
-            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
-                Text { text },
-            ))) => {
-                let mut handle = stdout.lock();
-                if let Err(e) = handle
-                    .write_all(text.as_bytes())
-                    .and_then(|_| handle.flush())
-                {
-                    stream_err = Some(MvError::CompletionFailed {
-                        details: format!("stdout write failed: {e}"),
-                    });
-                    break;
-                }
-                accumulator.push_str(&text);
-            }
-            Ok(MultiTurnStreamItem::FinalResponse(final_response)) => {
-                let usage = final_response.usage();
-                mv_core::trtllm::usage::Usage::from_counts(usage.input_tokens, usage.output_tokens)
-                    .record_on(&tracing::Span::current());
-            }
-            Ok(_) => continue,
-            Err(e) => {
-                let msg = e.to_string();
-                debug!(raw_error = %msg, "trtllm stream failed");
-                stream_err = Some(classify_backend_error(
-                    &msg,
-                    model_name,
-                    endpoint,
-                    START_HINT,
-                    Some(&entry.id),
-                ));
-                break;
-            }
+impl crate::workflow::engine::PromptExecutor for RigPromptExecutor {
+    async fn execute_prompt(
+        &self,
+        prompt_text: &str,
+        models: &[String],
+        temperature: Option<f64>,
+        max_tokens: Option<u64>,
+    ) -> Result<String, MvError> {
+        // Resolve each preferred id (a typo'd model must fail loudly —
+        // silently substituting the default would run the step elsewhere and
+        // report success), then expand the seeds through the shared chain
+        // builder: each id contributes itself + its own `fallback` entries,
+        // deduped. So a bare `model:` behaves exactly like the CLI path, and
+        // a `prefer:` list strings several such chains together.
+        let mut seeds: Vec<(&ModelEntry, String)> = Vec::new();
+        for id in models {
+            let entry = self
+                .registry
+                .get(id)
+                .ok_or_else(|| MvError::ModelNotInRegistry {
+                    model: id.clone(),
+                    available: self.registry.available_ids().join(", "),
+                })?;
+            seeds.push((entry, entry.endpoint()));
         }
+        let chain = build_chain(&self.registry, &seeds);
+
+        let params = GenParams {
+            temperature,
+            max_tokens,
+        };
+        // The engine only needs the text; `model_used` is recorded on the trace.
+        complete_chain(&chain, prompt_text, self.agent_handle.clone(), &params)
+            .await
+            .map(|outcome| outcome.text)
     }
+}
 
-    if let Some(err) = stream_err {
-        // Leave any partial output already written to stdout intact.
-        return Err(err);
+/// Tool executor that runs workflow tool steps against the shared agent
+/// ToolServer — the same merged built-in + MCP tool set the agent sees.
+pub struct HandleToolExecutor {
+    pub handle: ToolServerHandle,
+}
+
+impl crate::workflow::engine::ToolExecutor for HandleToolExecutor {
+    #[tracing::instrument(level = "info", skip(self, inputs), fields(tool.name = %tool_name))]
+    async fn execute_tool(
+        &self,
+        tool_name: &str,
+        inputs: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<String, MvError> {
+        let args = serde_json::to_string(inputs).map_err(|e| MvError::ToolCallFailed {
+            tool: tool_name.to_string(),
+            details: format!("failed to encode inputs: {e}"),
+        })?;
+        self.handle
+            .call_tool(tool_name, &args)
+            .await
+            .map_err(|e| MvError::ToolCallFailed {
+                tool: tool_name.to_string(),
+                details: e.to_string(),
+            })
     }
-
-    // Trailing newline after clean termination.
-    let mut handle = stdout.lock();
-    let _ = handle.write_all(b"\n");
-    let _ = handle.flush();
-
-    info!(len = accumulator.len(), "stream complete");
-    // Caller's print_success will print an empty string; the stream itself
-    // already wrote the full body + trailing newline to stdout.
-    Ok(String::new())
 }

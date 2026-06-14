@@ -4,7 +4,7 @@ use rig::tool::server::ToolServer;
 
 use crate::cli::{WorkflowRunArgs, WorkflowValidateArgs};
 use crate::commands::connect_mcp_servers;
-use crate::executors::{HandleToolExecutor, RigPromptExecutor};
+use mv_core::runtime::{HandleToolExecutor, RigPromptExecutor};
 
 pub async fn run_workflow(args: &WorkflowRunArgs, json: bool) -> Result<(), mv_core::MvError> {
     use std::path::Path;
