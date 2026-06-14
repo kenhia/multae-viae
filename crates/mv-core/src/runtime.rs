@@ -208,20 +208,15 @@ pub async fn complete(
     }
 }
 
-#[tracing::instrument(name = "llm_completion", skip(entry, handle, params), fields(
-    gen_ai.system = "ollama",
-    gen_ai.request.model = %entry.id,
-))]
-async fn call_ollama(
+/// Build an Ollama agent (client + preamble + tools + sampling). Shared by the
+/// one-shot path ([`call_ollama`]) and held sessions ([`AnyAgent`]).
+pub fn ollama_agent(
     entry: &ModelEntry,
     endpoint: &str,
-    prompt: &str,
     handle: ToolServerHandle,
     params: &GenParams,
-) -> Result<String, MvError> {
+) -> Result<rig::agent::Agent<rig::providers::ollama::CompletionModel>, MvError> {
     use rig::client::{CompletionClient, Nothing};
-
-    info!(model = %entry.id, endpoint = %endpoint, locality = "local", "connecting to Ollama");
 
     let client = rig::providers::ollama::Client::builder()
         .api_key(Nothing)
@@ -237,7 +232,23 @@ async fn call_ollama(
         .preamble(SYSTEM_PREAMBLE)
         .tool_server_handle(handle)
         .default_max_turns(entry.effective_max_turns());
-    let agent = params.apply(builder).build();
+    Ok(params.apply(builder).build())
+}
+
+#[tracing::instrument(name = "llm_completion", skip(entry, handle, params), fields(
+    gen_ai.system = "ollama",
+    gen_ai.request.model = %entry.id,
+))]
+async fn call_ollama(
+    entry: &ModelEntry,
+    endpoint: &str,
+    prompt: &str,
+    handle: ToolServerHandle,
+    params: &GenParams,
+) -> Result<String, MvError> {
+    info!(model = %entry.id, endpoint = %endpoint, locality = "local", "connecting to Ollama");
+
+    let agent = ollama_agent(entry, endpoint, handle, params)?;
 
     info!("sending prompt to model");
     let response = agent
@@ -248,21 +259,19 @@ async fn call_ollama(
     Ok(response)
 }
 
-#[tracing::instrument(name = "llm_completion", skip(entry, api_key, handle, params), fields(
-    gen_ai.system = "openai",
-    gen_ai.request.model = %entry.id,
-))]
-async fn call_openai(
+/// Build an OpenAI (cloud, Responses API) agent. Shared by the one-shot path
+/// ([`call_openai`]) and held sessions ([`AnyAgent`]).
+pub fn openai_agent(
     entry: &ModelEntry,
     endpoint: &str,
     api_key: &str,
-    prompt: &str,
     handle: ToolServerHandle,
     params: &GenParams,
-) -> Result<String, MvError> {
+) -> Result<
+    rig::agent::Agent<rig::providers::openai::responses_api::ResponsesCompletionModel>,
+    MvError,
+> {
     use rig::client::CompletionClient;
-
-    info!(model = %entry.id, endpoint = %endpoint, locality = "cloud", "connecting to OpenAI");
 
     let client = rig::providers::openai::Client::builder()
         .api_key(api_key)
@@ -278,7 +287,24 @@ async fn call_openai(
         .preamble(SYSTEM_PREAMBLE)
         .tool_server_handle(handle)
         .default_max_turns(entry.effective_max_turns());
-    let agent = params.apply(builder).build();
+    Ok(params.apply(builder).build())
+}
+
+#[tracing::instrument(name = "llm_completion", skip(entry, api_key, handle, params), fields(
+    gen_ai.system = "openai",
+    gen_ai.request.model = %entry.id,
+))]
+async fn call_openai(
+    entry: &ModelEntry,
+    endpoint: &str,
+    api_key: &str,
+    prompt: &str,
+    handle: ToolServerHandle,
+    params: &GenParams,
+) -> Result<String, MvError> {
+    info!(model = %entry.id, endpoint = %endpoint, locality = "cloud", "connecting to OpenAI");
+
+    let agent = openai_agent(entry, endpoint, api_key, handle, params)?;
 
     info!("sending prompt to model");
     let response = agent.prompt(prompt).await.map_err(|e| {
@@ -362,6 +388,92 @@ async fn call_trtllm(
     .record_on(&tracing::Span::current());
 
     Ok(response.output)
+}
+
+/// A built, held-open agent — one per provider, as a **closed enum** over the
+/// three concrete rig agent types (deliberately not `Box<dyn>`: the set of
+/// providers is fixed, so static dispatch keeps the type information and avoids
+/// a vtable). This is what a session holds between turns: built once via
+/// [`AnyAgent::build`], then driven with [`AnyAgent::chat_turn`], which threads
+/// the conversation history so context carries across turns.
+pub enum AnyAgent {
+    Ollama(rig::agent::Agent<rig::providers::ollama::CompletionModel>),
+    OpenAi(rig::agent::Agent<rig::providers::openai::responses_api::ResponsesCompletionModel>),
+    TrtLlm(rig::agent::Agent<rig::providers::openai::completion::CompletionModel>),
+}
+
+impl AnyAgent {
+    /// Build the held agent for `entry` (the same client/preamble/tools/sampling
+    /// the one-shot path uses), dispatching on provider. For TRT-LLM the caller
+    /// should preflight separately (as the one-shot path does) — this only
+    /// constructs the agent.
+    pub fn build(
+        entry: &ModelEntry,
+        endpoint: &str,
+        handle: ToolServerHandle,
+        params: &GenParams,
+    ) -> Result<Self, MvError> {
+        match entry.provider {
+            Provider::Ollama => Ok(Self::Ollama(ollama_agent(entry, endpoint, handle, params)?)),
+            Provider::Openai => {
+                let env_var = entry.api_key_env();
+                let api_key = std::env::var(env_var).map_err(|_| MvError::ApiKeyMissing {
+                    provider: entry.provider.to_string(),
+                    env_var: env_var.to_string(),
+                })?;
+                Ok(Self::OpenAi(openai_agent(
+                    entry, endpoint, &api_key, handle, params,
+                )?))
+            }
+            Provider::Trtllm => Ok(Self::TrtLlm(trtllm_agent(entry, endpoint, handle, params)?)),
+        }
+    }
+
+    /// Run one conversational turn: prompt the held agent with `prompt` and the
+    /// prior `history`, returning the assistant's reply. Tool round-trips happen
+    /// internally (bounded by the entry's max turns). Errors are classified with
+    /// the same provider-specific hints as the one-shot path.
+    pub async fn chat_turn(
+        &self,
+        entry: &ModelEntry,
+        endpoint: &str,
+        prompt: &str,
+        history: Vec<rig::completion::Message>,
+    ) -> Result<String, MvError> {
+        let max_turns = entry.effective_max_turns();
+        match self {
+            Self::Ollama(a) => a
+                .prompt(prompt)
+                .with_history(history)
+                .max_turns(max_turns)
+                .await
+                .map_err(|e| {
+                    classify_prompt_error(&e, &entry.id, endpoint, "Is Ollama running?", None)
+                }),
+            Self::OpenAi(a) => a
+                .prompt(prompt)
+                .with_history(history)
+                .max_turns(max_turns)
+                .await
+                .map_err(|e| {
+                    classify_prompt_error(&e, &entry.id, endpoint, "Check the endpoint URL.", None)
+                }),
+            Self::TrtLlm(a) => a
+                .prompt(prompt)
+                .with_history(history)
+                .max_turns(max_turns)
+                .await
+                .map_err(|e| {
+                    classify_prompt_error(
+                        &e,
+                        entry.model_name(),
+                        endpoint,
+                        START_HINT,
+                        Some(&entry.id),
+                    )
+                }),
+        }
+    }
 }
 
 /// Prompt executor that routes workflow prompt steps through the shared

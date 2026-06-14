@@ -111,7 +111,7 @@ over HTTP; `just ci` green offline.
 
 ## Phase 4: WS4 — Sessions
 
-- [ ] T019 [WS4] `enum AnyAgent` in `mv_core::runtime` over the three
+- [X] T019 [WS4] `enum AnyAgent` in `mv_core::runtime` over the three
   concrete agent types; agent-building factored out of `complete()`
   (build once / prompt many); one-shot path re-expressed as build + single
   prompt — CLI e2e still unmodified (FR-006, SC-006)
