@@ -282,6 +282,13 @@ impl ModelRegistry {
         self.models.iter().map(|m| m.id.as_str()).collect()
     }
 
+    /// All registered model entries, in declaration order. Lets a front end
+    /// (e.g. mv-server's `/v1/models`) enumerate the registry without resolving
+    /// each id individually.
+    pub fn entries(&self) -> &[ModelEntry] {
+        &self.models
+    }
+
     /// Built-in registry with hardcoded defaults (backward compat).
     pub fn built_in() -> Self {
         Self {

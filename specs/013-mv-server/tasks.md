@@ -78,27 +78,27 @@ clients in steady-state paths; `just ci` green.
 
 ## Phase 3: WS3 — Server skeleton + one-shot endpoints
 
-- [ ] T012 [WS3] New workspace member `crates/mv-server`: lib target with
+- [X] T012 [WS3] New workspace member `crates/mv-server`: lib target with
   `build_router(AppState) -> Router` + thin `main.rs` (clap: `--bind`
   default `127.0.0.1:7077`, `--models`, `--mcp-servers`, `--workflows-dir`,
   `--schedules`, `--otlp`); add axum dep, tower/http-body-util dev-deps;
   resolve any http/hyper graph friction and record pins in plan.md
   (FR-003)
-- [ ] T013 [WS3] Failing oneshot test → `GET /health` (liveness + backend
+- [X] T013 [WS3] Failing oneshot test → `GET /health` (liveness + backend
   and MCP-manager summary) and `GET /v1/models` (registry: id, provider,
   locality, default) (FR-004)
-- [ ] T014 [WS3] `impl IntoResponse for MvError`: envelope
+- [X] T014 [WS3] `impl IntoResponse for MvError`: envelope
   `{"error": {code, message, hint?}}` + status mapping (404 not-found, 400
   input, 503 not-loaded/unreachable, 502 backend-error-response, 500
   rest); pinned matrix test (FR-005, SC-002)
-- [ ] T015 [WS3] Failing test → `POST /v1/prompt` {prompt, model?, …}
+- [X] T015 [WS3] Failing test → `POST /v1/prompt` {prompt, model?, …}
   through `mv_core::runtime` with fallback chain semantics; hermetic e2e
   via fake proxy: success body + not-loaded-502 → `503 MODEL_NOT_LOADED`
   with hint (FR-004, SC-001, SC-002)
-- [ ] T016 [WS3] Failing test → `POST /v1/workflows/run` {workflow, inputs}
+- [X] T016 [WS3] Failing test → `POST /v1/workflows/run` {workflow, inputs}
   via the workflow engine with the real executors; outputs object returned;
   validation errors map through the envelope (FR-004, SC-001)
-- [ ] T017 [P] [WS3] Path boundary: workflow names resolve strictly inside
+- [X] T017 [P] [WS3] Path boundary: workflow names resolve strictly inside
   `--workflows-dir`; failing test with `../` rejected `400` before any
   file I/O (FR-011)
 - [ ] T018 [P] [WS3] Telemetry: HTTP server spans wrapping the existing
