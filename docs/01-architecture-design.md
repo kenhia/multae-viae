@@ -8,7 +8,7 @@ The core philosophy is: **small core, extensible surface**.
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                     CLI / API Surface                       │
-│  (gRPC server, REST API, CLI commands, WebSocket events)    │
+│  (mv-cli commands · mv-server REST API — sprint 013)        │
 ├─────────────────────────────────────────────────────────────┤
 │                   Orchestration Layer                       │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────────┐   │
@@ -95,7 +95,7 @@ Sprint 008 seam (`complete()` dispatch + `is_fallback_eligible()`):
 1. **Prescriptive** *(shipped)*: DSL specifies an exact model per step
 2. **Hybrid** *(shipped, sprint 009)*: a step `model: { prefer: [...] }` list
    and/or a `fallback: [...]` chain on a `models.yaml` entry, walked by
-   `complete_chain()` in `mv-cli/src/providers.rs` — the first reachable model
+   `complete_chain()` in `mv-core/src/runtime.rs` — the first reachable model
    serves. `mv_core::preflight` skips dead locals before an agent is built; the
    substitution surfaces via a stderr note, the `--json` `model_used` field, and
    `router.*` span attributes
@@ -152,6 +152,13 @@ Uses the **RMCP** crate (`rmcp`) to connect to MCP servers. Supports:
 - Multiple simultaneous server connections
 - Dynamic capability discovery (tools, resources, prompts)
 
+Connections are owned by **`McpManager`** (`mv-core/src/mcp/manager.rs`), the
+single lifecycle implementation (sprint 013). The CLI uses it in one-shot mode
+(connect → use → shut down); the `mv-server` daemon additionally keeps it alive
+with health checks and exponential-backoff reconnect. Shutdown is concurrent
+and time-bounded (`join_all` with a per-server timeout), so one server hanging
+on cancel cannot wedge process exit.
+
 #### Model Backends
 
 Abstraction over multiple inference providers:
@@ -182,8 +189,9 @@ an OpenAI-compatible `/v1/chat/completions` endpoint. The provider module adds:
   `<|eot_id|>`) forwarded via Rig `additional_params`
 - `usage.rs` — Lenient token-usage deserialization, recorded as
   `gen_ai.usage.{input,output}_tokens` span attributes
-- Provider dispatch in `mv-cli/src/providers.rs` (`call_trtllm()` /
-  `stream_trtllm()` sharing preflight, agent builder, and usage helpers)
+- Provider dispatch in `mv-core/src/runtime.rs` (`call_trtllm()` sharing
+  preflight, the `trtllm_agent()` builder, and usage helpers with `mv-cli`'s
+  `stream_trtllm()`, which is the one runtime piece that stays in the binary)
 - `gen_ai.system = "trtllm"` span attribute for OpenTelemetry traces
 - `served_name` field on `ModelEntry` for HuggingFace path → short name mapping
 - A 502 from the proxy classifies as `ModelNotLoaded` with a
@@ -290,10 +298,12 @@ User Goal
 
 ## Crate Structure
 
-A deliberately small two-crate workspace. The originally proposed satellite
-crates (`mv-engine`, `mv-mcp`, `mv-dsl`, `mv-telemetry`) were absorbed into
-`mv-core` as modules — the standing rule is **anything a future `mv-server`
-needs lives in `mv-core`**; the binary crate holds only CLI concerns.
+A three-crate workspace. The originally proposed satellite crates
+(`mv-engine`, `mv-mcp`, `mv-dsl`, `mv-telemetry`) were absorbed into `mv-core`
+as modules — the standing rule is **anything a front end needs lives in
+`mv-core`**; the binaries hold only their own concerns. As of sprint 013 the
+agent runtime (provider dispatch, the workflow executors, the klams memory
+impl) lives in `mv-core` so both `mv-cli` and `mv-server` drive it.
 
 ```
 multae-viae/
@@ -301,16 +311,19 @@ multae-viae/
 ├── crates/
 │   ├── mv-core/            # Library: all reusable logic
 │   │   └── src/
-│   │       ├── lib.rs       # ModelEntry/ModelRegistry, Provider enum, MvError
-│   │       ├── providers.rs # SYSTEM_PREAMBLE, error classification,
+│   │       ├── lib.rs       # ModelEntry/ModelRegistry, Provider enum, MvError (+ code())
+│   │       ├── providers.rs # SYSTEM_PREAMBLE, error classification + code(),
 │   │       │                #   is_fallback_eligible / is_retryable taxonomy
-│   │       ├── mcp/         # MCP config, RMCP client, tool registry merge
-│   │       ├── tools/       # Built-in tools + ToolPolicy seam
+│   │       ├── runtime.rs   # complete()/complete_chain() fallback walker, the
+│   │       │                #   per-provider agent builders, AnyAgent (held
+│   │       │                #   sessions), RigPromptExecutor/HandleToolExecutor
+│   │       ├── http.rs      # shared pooled reqwest::Client
+│   │       ├── mcp/         # config, RMCP client, manager (lifecycle), registry merge
+│   │       ├── memory/      # MemoryStore trait + klams.rs (KlamsMemory/SessionMemory)
+│   │       ├── tools/       # Built-in tools (async) + ToolPolicy seam
 │   │       │   ├── mod.rs    # ToolPolicy, constants, truncation helper
-│   │       │   ├── file_list.rs
-│   │       │   ├── file_read.rs
-│   │       │   ├── shell_exec.rs
-│   │       │   └── http_get.rs
+│   │       │   ├── file_list.rs / file_read.rs   # tokio::fs
+│   │       │   └── shell_exec.rs / http_get.rs
 │   │       ├── preflight.rs # per-provider liveness probe (Healthy/Dead/Unknown)
 │   │       ├── trtllm/      # health.rs, stop.rs, usage.rs
 │   │       └── workflow/    # DSL engine (rig-free)
@@ -320,11 +333,18 @@ multae-viae/
 │   │   └── src/
 │   │       ├── main.rs      # Output contract (stdout/stderr × --json), dispatch
 │   │       ├── cli.rs       # clap definitions
-│   │       ├── providers.rs # complete() seam + complete_chain() fallback walker
+│   │       ├── stream.rs    # TRT-LLM terminal streaming (the one runtime bit that stays)
 │   │       ├── telemetry.rs # tracing + OTLP-HTTP exporter wiring
-│   │       ├── executors.rs # RigPromptExecutor / HandleToolExecutor
 │   │       └── commands/    # prompt.rs, workflow.rs
-│   └── mv-server/          # gRPC/REST API server (future — Phase 6)
+│   └── mv-server/          # REST controller daemon (Phase 6.3, sprint 013)
+│       └── src/
+│           ├── lib.rs       # build_router + AppState (testable in-process)
+│           ├── main.rs      # flags, bind, ordered graceful shutdown
+│           ├── handlers.rs  # /health, /v1/models, /v1/prompt, /v1/workflows/run
+│           ├── session.rs   # held-open sessions over AnyAgent
+│           ├── scheduler.rs # cron-driven workflow runs
+│           ├── error.rs     # ApiError: MvError → HTTP status + JSON envelope
+│           └── telemetry.rs # HTTP server spans + OTLP
 ├── docs/                   # This documentation
 ├── specs/                  # Sprint specifications (SDD)
 └── workflows/              # Example workflow YAML files
@@ -464,5 +484,8 @@ Current dependencies (see the crate `Cargo.toml`s):
 | Error Handling | thiserror (single `MvError` enum) | `thiserror` |
 | Local Inference | Ollama + TRT-LLM proxy, via Rig's HTTP providers | `rig-core` |
 
-Future (not yet dependencies): an HTTP/gRPC server stack for `mv-server`
-(Phase 6) and an embedded-inference backend (mistral.rs) if adopted.
+`mv-server` (sprint 013) adds an HTTP stack — `axum` + `tower-http`, `croner`
+for cron scheduling — over the same `mv-core` runtime; see
+[docs/12-mv-server.md](12-mv-server.md). Future (not yet dependencies): a second
+controller protocol (MCP, Phase 7) and an embedded-inference backend
+(mistral.rs) if adopted.

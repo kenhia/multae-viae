@@ -35,18 +35,28 @@ external backend, mark it `#[ignore]` so the default suite stays hermetic.
 
 ## Architecture
 
-Two-crate workspace:
+Three-crate workspace:
 
-- **`mv-core`** — the library: all reusable logic, provider primitives, and the workflow engine.
-- **`mv-cli`** — the binary (`mv-cli`): clap parsing, provider dispatch, telemetry wiring, and
-  the concrete `PromptExecutor`/`ToolExecutor` impls that bridge the workflow engine to Rig.
+- **`mv-core`** — the library: all reusable logic — provider primitives, the **agent runtime**
+  (`runtime.rs`: dispatch, fallback, the `AnyAgent` held-session enum, the workflow executors),
+  the klams memory impl (`memory/klams.rs`), the MCP lifecycle manager, and the workflow engine.
+- **`mv-cli`** — the binary: clap parsing, the stdout/stderr output contract, TRT-LLM terminal
+  streaming (`stream.rs`), and telemetry wiring. A thin caller of `mv-core`.
+- **`mv-server`** — the REST controller daemon (sprint 013): an axum API, held-open sessions, and
+  a cron scheduler over the same `mv-core` runtime. Also a thin caller. See
+  [docs/12-mv-server.md](docs/12-mv-server.md).
+
+The standing rule: **anything a front end needs lives in `mv-core`**; the binaries hold only their
+own concerns.
 
 ### Provider dispatch (the central seam)
 
-[crates/mv-cli/src/main.rs](crates/mv-cli/src/main.rs) `run_prompt()` resolves a `ModelEntry`
-from `models.yaml` and branches on `entry.provider` to one of `call_ollama`, `call_openai`,
-`call_trtllm`, or `stream_trtllm`. Each builds a Rig agent with the shared `SYSTEM_PREAMBLE`,
-attaches the unified tool set, and runs a multi-turn agentic loop (up to 10 turns).
+[crates/mv-core/src/runtime.rs](crates/mv-core/src/runtime.rs) `complete()` resolves a `ModelEntry`
+and branches on `entry.provider` to one of `call_ollama`, `call_openai`, or `call_trtllm` (plus
+`mv-cli`'s `stream_trtllm`). Each builds a Rig agent — via the shared `ollama_agent`/`openai_agent`/
+`trtllm_agent` builders — with `SYSTEM_PREAMBLE`, attaches the unified tool set, and runs a
+multi-turn agentic loop. `complete_chain()` walks a fallback chain over `complete()`; both `mv-cli`
+and `mv-server` call these.
 
 `ModelEntry` ([crates/mv-core/src/lib.rs](crates/mv-core/src/lib.rs)) is the config-to-runtime
 bridge: methods like `endpoint()`, `model_name()` (`served_name` ?? `id`), `locality()`, and
@@ -97,7 +107,7 @@ Jaeger). Span/attribute names follow OpenTelemetry GenAI conventions (`gen_ai.*`
 
 This repo is **spec-driven** ([.specify/memory/constitution.md](.specify/memory/constitution.md)).
 The user calls each spec block a **"sprint"** — they map to `specs/NNN-name/` directories. The
-active sprint is the highest-numbered one (currently `specs/007-trtllm-hardening/`); its
+active sprint is the highest-numbered one (currently `specs/013-mv-server/`); its
 `tasks.md` is the live checklist and `plan.md` the technical context.
 
 - **No code change without a spec entry.** Ad-hoc changes go in the active spec or

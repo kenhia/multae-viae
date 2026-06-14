@@ -152,15 +152,16 @@ restart recovery proven live; `just ci` green.
   SIGTERM with in-flight request completes it and exits 0 (FR-010, SC-005)
 - [X] T028 [P] [WS5] Operations: `just serve` recipe; sample systemd unit
   in docs (FR-013)
-- [ ] T029 [WS5] `docs/12-mv-server.md`: API reference (endpoints, error
+- [X] T029 [WS5] `docs/12-mv-server.md`: API reference (endpoints, error
   envelope + codes, status mapping), config flags, schedules format,
   service setup (FR-013)
-- [ ] T030 [WS5] Truth pass: `docs/01-architecture-design.md` (third
+- [~] T030 [WS5] Truth pass: `docs/01-architecture-design.md` (third
   crate, runtime now in `mv-core`, MCP manager — fix the stale "Drop shuts
-  down" claim), `docs/04-mcp-integration.md` lifecycle section, README,
-  architecture SVG gains the mv-server panel; CLAUDE.md architecture notes
-  updated (FR-013)
-- [ ] T031 [WS5] Roadmap: flip Phase 6.3 checkboxes in
+  down" claim) ✓, `docs/04-mcp-integration.md` lifecycle section ✓, README ✓,
+  CLAUDE.md architecture notes ✓. **Architecture SVG mv-server panel: deferred**
+  — re-authoring the hand-tuned diagram needs the cairosvg render-verify loop;
+  tracked as a follow-up rather than risk corrupting the verified asset. (FR-013)
+- [X] T031 [WS5] Roadmap: flip Phase 6.3 checkboxes in
   `docs/09-roadmap.md`, record lessons learned (FR-013)
 
 **Checkpoint**: daemon runs as a service, schedules fire, shuts down

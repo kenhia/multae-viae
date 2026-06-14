@@ -473,17 +473,42 @@ consumers), then the step types that need it.
 
 ### Phase 6.3: mv-server (sprint 013)
 
-- [ ] Axum REST API server (`mv-server`); `MvError::code()` for
+- [x] Axum REST API server (`mv-server`); `MvError::code()` for
       machine-readable errors
-- [ ] Session/conversation management over the API (held-open agents via a
+- [x] Session/conversation management over the API (held-open agents via a
       closed `enum AnyAgent`; memory via the 6.1 seam)
-- [ ] Scheduled workflow execution
-- [ ] Daemon pre-work from the fable register: MCP connection manager (F22),
+- [x] Scheduled workflow execution
+- [x] Daemon pre-work from the fable register: MCP connection manager (F22),
       shared `reqwest::Client` + `tokio::fs` in tool paths (F23)
-- [ ] Graceful shutdown and state persistence
+- [x] Graceful shutdown (state persistence is delegated to klams — no local DB)
 
 **Deliverable**: controller runs as a system service; accepts requests via
-API, executes scheduled workflows, consumes klams-monitor events.
+API, executes scheduled workflows, consumes klams-monitor events. **Shipped**
+— see [docs/12-mv-server.md](12-mv-server.md).
+
+### Phase 6.3 Lessons Learned
+
+- **Sink the runtime first, alone.** WS1 moved provider dispatch, the workflow
+  executors, and the klams memory impl from `mv-cli` into `mv-core` before any
+  server code existed; the gate was the *existing CLI e2e suite passing
+  unmodified*. Doing the pure churn first, with a clear regression net, kept
+  the server work from entangling with it.
+- **`enum AnyAgent`, not `Box<dyn>`.** The three concrete rig agent types
+  (`ollama::CompletionModel`, openai responses + completion models) are
+  nameable, so a closed enum holds a built agent per provider with static
+  dispatch. Held sessions thread `with_history(...)` across turns; the agent is
+  built once, prompted many.
+- **`McpManager::shutdown(&self)`, not `self`.** A daemon holds the manager
+  behind an `Arc`; shutdown drains an internal mutex, so `&self` lets the
+  Arc-held manager be stopped at exit (and made it idempotent for tests).
+- **lib + thin bin.** Per the 6.1 no-lib-target lesson, `mv-server` is a library
+  (`build_router`/`AppState`) plus a thin `main.rs`, so the whole API is tested
+  in-process with `tower::ServiceExt::oneshot` — no ports, no subprocess.
+- **Scheduler timing tests stay non-flaky** by testing the load/validate matrix
+  deterministically and the firing path with an every-second cron behind a
+  generous (~3s) sentinel poll, never a tight sleep.
+- **Deferred:** cross-server tool namespacing (`server.tool`) still only
+  warns on collision; SSE/streaming responses and API auth are Phase 7.
 
 ---
 

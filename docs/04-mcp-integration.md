@@ -255,18 +255,34 @@ servers:
 
 ### Client (`client.rs`)
 
-The MCP client handles connection lifecycle:
+The MCP client (`client.rs`) handles per-server connection:
 
 - **`connect_stdio()`** — Spawns a child process, performs MCP handshake, and
   discovers tools via `McpClientHandler`
 - **`connect_http()`** — Connects to an HTTP endpoint using
   `StreamableHttpClientTransport`
-- **`connect_all_servers()`** — Iterates all configured servers, connects each
-  one, and gracefully skips failures
-- **`shutdown_all()`** — Sends shutdown to all connected MCP servers on CLI exit
+- **`connect_one()`** — Dispatches to the right transport; the shared per-server
+  connect primitive
+- **`McpConnection::is_alive()`** — Whether the transport is still open (the
+  daemon's reconnect signal)
 
-All functions are instrumented with `#[tracing::instrument]` and emit
-OpenTelemetry spans with `mcp.server.name` and `mcp.transport` attributes.
+Bulk connect and shutdown are owned by **`McpManager`** (`manager.rs`, sprint
+013), the single MCP lifecycle implementation:
+
+- **`McpManager::connect()`** — Connects every configured server, registers
+  their cleaned tools, and returns the manager owning the live connections.
+  Per-server failures are logged and skipped (an MCP server is never fatal).
+- **`reconnect_dead()`** — Reaps closed connections and redials configured
+  servers that are not currently live, re-registering their tools; paired with
+  an exponential-backoff schedule (`Backoff`) for the daemon's monitor.
+- **`shutdown()`** — Cancels all connections **concurrently** (`join_all`),
+  each under a per-server timeout, so one server hanging on cancel cannot wedge
+  process exit.
+
+The CLI drives the manager in one-shot mode (connect → use → shut down); the
+`mv-server` daemon keeps it alive and reconnects. All connect functions are
+instrumented with `#[tracing::instrument]` and emit OpenTelemetry spans with
+`mcp.server.name` and `mcp.transport` attributes.
 
 ### Tool Registry (`registry.rs`)
 
@@ -274,7 +290,8 @@ Tool collision detection ensures MCP tools merge cleanly with built-in tools:
 
 - Built-in tools (`file_list`, `file_read`, `shell_exec`, `http_get`) always
   take precedence over MCP tools with the same name
-- Cross-server MCP tool name collisions are logged as warnings
+- Cross-server MCP tool name collisions are logged as warnings (first
+  registration wins; `server.tool` namespacing is a future step)
 
 ### Architecture
 
@@ -286,4 +303,5 @@ The implementation uses rig-core's `ToolServer` pattern:
    discovered tools on the shared handle
 4. The agent builder receives the handle via `.tool_server_handle(handle)`,
    giving the model a single unified tool set
-5. On CLI exit, all MCP connections are shut down gracefully
+5. At exit (CLI run end, or daemon `SIGTERM`), `McpManager::shutdown` closes all
+   connections concurrently under a per-server timeout
