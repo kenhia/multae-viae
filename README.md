@@ -3,6 +3,10 @@
 A local-first agentic controller built in Rust that orchestrates multiple LLMs,
 tools, and services to act as an always-on AI assistant.
 
+![multae-viae architecture](docs/assets/architecture.svg)
+
+*Detail view of the workflow engine: [docs/assets/architecture-workflow.svg](docs/assets/architecture-workflow.svg)*
+
 ## Vision
 
 - **Local-first**: Models run locally via Ollama/TensorRT-LLM/mistral.rs, with cloud fallback
