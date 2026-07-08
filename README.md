@@ -1,5 +1,9 @@
 # multae-viae — many paths
 
+> **Archived.** This project is being superseded by a new controller. This
+> README will be updated with a pointer once the successor reaches MVP and is
+> published to GitHub.
+
 A local-first agentic controller built in Rust that orchestrates multiple LLMs,
 tools, and services to act as an always-on AI assistant.
 
