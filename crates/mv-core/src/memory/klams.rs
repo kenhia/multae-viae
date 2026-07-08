@@ -6,10 +6,8 @@
 
 use rig::tool::server::ToolServerHandle;
 
-use mv_core::MvError;
-use mv_core::memory::{
-    MemoryItem, MemoryStore, RecallOpts, SessionMeta, TurnRecord, truncate_field,
-};
+use crate::MvError;
+use crate::memory::{MemoryItem, MemoryStore, RecallOpts, SessionMeta, TurnRecord, truncate_field};
 
 /// How many prior turns / recalled items to inject. Small on purpose: stale
 /// context hurts answers, and small reads stay well under the tool-output cap.

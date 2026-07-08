@@ -1,5 +1,7 @@
 # DSL & Flow Management
 
+![workflow engine overview](assets/architecture-workflow.svg)
+
 ## Vision
 
 A YAML-based DSL for defining agent workflows — similar in spirit to Azure

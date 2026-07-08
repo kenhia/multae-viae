@@ -2,11 +2,10 @@
 //!
 //! A provider-agnostic trait the prompt path uses to give a run continuity:
 //! register a session author, recall prior context before the completion, and
-//! record the turn after. The klams-backed implementation lives in the binary
-//! (the [`crate::workflow::engine::PromptExecutor`] pattern — trait in core,
-//! impl in `mv-cli`), so mv-core stays free of klams/MCP specifics. Author ids
-//! cross the boundary as opaque `String`s; only the klams impl knows they are
-//! UUIDs.
+//! record the turn after. The klams-backed implementation ([`klams`]) drives
+//! the pinned MCP tools through a `ToolServerHandle`; author ids cross the
+//! trait boundary as opaque `String`s, so the trait stays free of klams/MCP
+//! specifics and is mock-tested independently of any backend.
 //!
 //! Memory is **best-effort**: every method can fail, and the prompt path is
 //! expected to warn-and-continue rather than block the user's request. See
@@ -15,6 +14,10 @@
 use std::future::Future;
 
 use crate::MvError;
+
+pub mod klams;
+
+pub use klams::{KlamsMemory, SessionMemory};
 
 /// Identity + metadata for a memory-active run, recorded once at session start
 /// via [`MemoryStore::register_session`]. Maps onto klams `register_author`

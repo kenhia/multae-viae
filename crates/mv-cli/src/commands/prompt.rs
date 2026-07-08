@@ -4,9 +4,10 @@ use rig::tool::server::ToolServer;
 use tracing::{debug, info};
 
 use crate::cli::PromptArgs;
-use crate::commands::connect_mcp_servers;
-use crate::providers::{CompletionOutcome, GenParams, complete_with_fallback, stream_trtllm};
+use crate::stream::stream_trtllm;
 use mv_core::Provider;
+use mv_core::mcp::manager::McpManager;
+use mv_core::runtime::{CompletionOutcome, GenParams, complete_with_fallback};
 
 #[tracing::instrument(name = "mv_cli_request", skip(args), fields(
     prompt = %args.prompt,
@@ -76,12 +77,13 @@ pub async fn run_prompt(
     }
     let agent_handle = tool_server.run();
 
-    // Connect MCP servers to a separate handle, then register cleaned tools on
-    // the agent handle (skipped entirely under --no-tools).
-    let mcp_connections = if args.no_tools {
-        Vec::new()
+    // Connect MCP servers via the manager (one-shot mode), which registers
+    // cleaned tools on the agent handle. `--no-tools` skips MCP entirely; an
+    // empty manager shuts down as a no-op.
+    let mcp_manager = if args.no_tools {
+        None
     } else {
-        connect_mcp_servers(args.mcp_config.as_deref(), &agent_handle).await?
+        Some(McpManager::connect(args.mcp_config.as_deref(), &agent_handle).await?)
     };
 
     // Begin a memory session if requested. Memory rides the same MCP tools, so
@@ -102,8 +104,8 @@ pub async fn run_prompt(
                 client_app: "mv-cli".to_string(),
                 client_version: env!("CARGO_PKG_VERSION").to_string(),
             };
-            match crate::memory::SessionMemory::begin(
-                crate::memory::KlamsMemory::new(agent_handle.clone()),
+            match mv_core::memory::SessionMemory::begin(
+                mv_core::memory::KlamsMemory::new(agent_handle.clone()),
                 meta,
             )
             .await
@@ -158,7 +160,9 @@ pub async fn run_prompt(
     }
 
     // Always shut down MCP connections, even on error
-    mv_core::mcp::client::shutdown_all(mcp_connections).await;
+    if let Some(manager) = mcp_manager {
+        manager.shutdown().await;
+    }
 
     let outcome = result?;
     info!(len = outcome.text.len(), model_used = %outcome.model_used, "received response");

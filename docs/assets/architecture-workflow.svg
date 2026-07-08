@@ -1,0 +1,192 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1480" height="790" viewBox="0 0 1480 790" role="img" aria-labelledby="title desc">
+  <title id="title">multae-viae workflow engine detail</title>
+  <desc id="desc">The workflow engine pipeline: load, validate, execute. Seven step types (prompt, tool, transform, branch, parallel, loop, workflow) read and write one typed ExecutionContext of serde_json Values. Prompt and tool steps leave mv-core through the PromptExecutor and ToolExecutor traits, implemented in mv-cli by RigPromptExecutor and HandleToolExecutor. A workflow step re-enters the pipeline with a child file, guarded by cycle detection and a depth cap.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0c111e"/>
+      <stop offset="1" stop-color="#101a2c"/>
+    </linearGradient>
+    <marker id="mTeal" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0 0.8 L8 4.5 L0 8.2 z" fill="#34d3bd"/>
+    </marker>
+    <marker id="mPurple" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0 0.8 L8 4.5 L0 8.2 z" fill="#b189f5"/>
+    </marker>
+    <marker id="mSlate" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0 0.8 L8 4.5 L0 8.2 z" fill="#8fa3bd"/>
+    </marker>
+    <marker id="mSlateR" markerWidth="9" markerHeight="9" refX="1" refY="4.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M9 0.8 L1 4.5 L9 8.2 z" fill="#8fa3bd"/>
+    </marker>
+    <style>
+      text { font-family: system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+      .mono { font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, "DejaVu Sans Mono", monospace; }
+      .h1     { font-size: 30px; font-weight: 700; fill: #eef4fb; }
+      .h1sub  { font-size: 30px; font-weight: 300; fill: #7e93ad; }
+      .sub    { font-size: 14px; fill: #93a7bf; }
+      .sect   { font-size: 15px; font-weight: 700; letter-spacing: 0.4px; fill: #c7d5e8; }
+      .label  { font-size: 13.5px; font-weight: 600; fill: #f0f6ff; }
+      .boxt   { font-size: 14px; font-weight: 700; fill: #def7f1; }
+      .tiny   { font-size: 11px; fill: #8da2ba; }
+      .tiny2  { font-size: 10px; fill: #8da2ba; }
+      .note   { font-size: 11px; font-style: italic; fill: #7e93ad; }
+      .foot   { font-size: 11px; fill: #5d7188; }
+      .flowT { fill: none; stroke: #34d3bd; stroke-width: 2.2; stroke-linecap: round; marker-end: url(#mTeal); }
+      .flowP { fill: none; stroke: #b189f5; stroke-width: 2; stroke-linecap: round; marker-end: url(#mPurple); }
+      .tick  { fill: none; stroke: #8fa3bd; stroke-width: 1.6; marker-end: url(#mSlate); marker-start: url(#mSlateR); opacity: 0.75; }
+    </style>
+  </defs>
+
+  <rect width="1480" height="790" fill="url(#bg)"/>
+
+  <text x="64" y="60" class="h1">multae-viae<tspan class="h1sub" dx="10">— workflow engine</tspan></text>
+  <text x="64" y="88" class="sub">mv-core::workflow — every YAML workflow passes load → validate → execute · steps read and write one typed context</text>
+
+  <!-- ======================= pipeline row ======================= -->
+  <g id="pipeline">
+    <rect x="64" y="124" width="296" height="92" rx="10" fill="#131c30" stroke="#6ea8e8" stroke-opacity="0.45"/>
+    <text x="80" y="156" class="mono" font-size="12" fill="#bfe0ff">mv-cli workflow run flow.yaml</text>
+    <text x="80" y="178" class="tiny">--input key=value · --json</text>
+    <text x="80" y="198" class="tiny2">authoring errors surface before any model call</text>
+    <path class="flowT" d="M360 170 H 398"/>
+
+    <rect x="404" y="124" width="170" height="92" rx="10" fill="#0d332d" stroke="#34d3bd" stroke-opacity="0.55"/>
+    <text x="489" y="154" class="boxt" text-anchor="middle">load</text>
+    <text x="489" y="176" class="tiny" text-anchor="middle">serde_yml — strict</text>
+    <text x="489" y="194" class="tiny2" text-anchor="middle">unknown fields rejected</text>
+    <path class="flowT" d="M574 170 H 602"/>
+
+    <rect x="608" y="124" width="300" height="92" rx="10" fill="#0d332d" stroke="#34d3bd" stroke-opacity="0.55"/>
+    <text x="758" y="150" class="boxt" text-anchor="middle">validate</text>
+    <text x="758" y="170" class="tiny2" text-anchor="middle">dup ids · unresolved {{refs}} · template syntax</text>
+    <text x="758" y="186" class="tiny2" text-anchor="middle">branch maybe-defined · parallel disjoint</text>
+    <text x="758" y="202" class="tiny2" text-anchor="middle">children: missing file · cycles · depth ≤ 8</text>
+    <path class="flowT" d="M908 170 H 936"/>
+
+    <rect x="942" y="124" width="220" height="92" rx="10" fill="#0d332d" stroke="#34d3bd" stroke-opacity="0.55"/>
+    <text x="1052" y="154" class="boxt" text-anchor="middle">execute</text>
+    <text x="1052" y="176" class="tiny" text-anchor="middle">steps in order, one context</text>
+    <text x="1052" y="194" class="tiny2" text-anchor="middle">on_error: skip · fail · retry</text>
+    <path class="flowT" d="M1162 170 H 1190" stroke-dasharray="5 4"/>
+
+    <rect x="1196" y="124" width="196" height="92" rx="10" fill="#10182a" stroke="#3d4f66" stroke-opacity="0.7"/>
+    <text x="1294" y="154" class="label" text-anchor="middle">retry policy</text>
+    <text x="1294" y="176" class="tiny2" text-anchor="middle">transient errors only</text>
+    <text x="1294" y="192" class="tiny2" text-anchor="middle">expo backoff · 30s cap</text>
+  </g>
+
+  <!-- recursion: workflow step re-enters the pipeline -->
+  <path class="flowP" d="M1304 280 V 251 Q 1304 244 1297 244 H 496 Q 489 244 489 237 V 222"/>
+  <text x="880" y="236" class="tiny2" fill="#c9b1f7" text-anchor="middle">a workflow step re-enters the pipeline — child file, isolated inputs, guarded for cycles &amp; depth</text>
+
+  <!-- ======================= step gallery ======================= -->
+  <text x="64" y="270" class="sect">STEP TYPES</text>
+  <text x="220" y="270" class="tiny2" fill="#6cb6ff">blue = leaves mv-core via a trait</text>
+  <text x="420" y="270" class="tiny2" fill="#38d6e8">cyan = data</text>
+  <text x="510" y="270" class="tiny2" fill="#c9b1f7">purple = control flow</text>
+
+  <g id="steps">
+    <!-- prompt -->
+    <rect x="64" y="280" width="176" height="150" rx="9" fill="#121c30" stroke="#6cb6ff" stroke-opacity="0.45"/>
+    <text x="80" y="306" class="mono" font-size="13" fill="#6cb6ff">prompt</text>
+    <text x="80" y="330" class="tiny2">render template → LLM</text>
+    <text x="80" y="347" class="tiny2">model: id | prefer: […]</text>
+    <text x="80" y="364" class="tiny2">reply enters the context</text>
+    <text x="80" y="406" class="mono" font-size="10.5" fill="#6cb6ff">→ PromptExecutor</text>
+
+    <!-- tool -->
+    <rect x="256" y="280" width="176" height="150" rx="9" fill="#121c30" stroke="#6cb6ff" stroke-opacity="0.45"/>
+    <text x="272" y="306" class="mono" font-size="13" fill="#6cb6ff">tool</text>
+    <text x="272" y="330" class="tiny2">built-in or MCP tool</text>
+    <text x="272" y="347" class="tiny2">args are templated</text>
+    <text x="272" y="364" class="tiny2">result enters the context</text>
+    <text x="272" y="406" class="mono" font-size="10.5" fill="#6cb6ff">→ ToolExecutor</text>
+
+    <!-- transform -->
+    <rect x="448" y="280" width="176" height="150" rx="9" fill="#121c30" stroke="#38d6e8" stroke-opacity="0.45"/>
+    <text x="464" y="306" class="mono" font-size="13" fill="#38d6e8">transform</text>
+    <text x="464" y="330" class="tiny2">extract_json</text>
+    <text x="464" y="347" class="tiny2">string → typed Value</text>
+    <text x="464" y="364" class="tiny2">fields usable downstream</text>
+    <text x="464" y="406" class="mono" font-size="10.5" fill="#38d6e8">{{report.title}}</text>
+
+    <!-- branch -->
+    <rect x="640" y="280" width="176" height="150" rx="9" fill="#121c30" stroke="#b189f5" stroke-opacity="0.45"/>
+    <text x="656" y="306" class="mono" font-size="13" fill="#c9b1f7">branch</text>
+    <text x="656" y="330" class="tiny2">minijinja condition</text>
+    <text x="656" y="347" class="tiny2">then / else arms</text>
+    <text x="656" y="364" class="tiny2">an output exists after only</text>
+    <text x="656" y="381" class="tiny2">if every arm defines it</text>
+    <text x="656" y="406" class="mono" font-size="10.5" fill="#c9b1f7">score &gt;= 8</text>
+
+    <!-- parallel -->
+    <rect x="832" y="280" width="176" height="150" rx="9" fill="#121c30" stroke="#b189f5" stroke-opacity="0.45"/>
+    <text x="848" y="306" class="mono" font-size="13" fill="#c9b1f7">parallel</text>
+    <text x="848" y="330" class="tiny2">fork-join children</text>
+    <text x="848" y="347" class="tiny2">snapshot isolation —</text>
+    <text x="848" y="364" class="tiny2">siblings invisible</text>
+    <text x="848" y="381" class="tiny2">outputs must be disjoint</text>
+    <text x="848" y="406" class="mono" font-size="10.5" fill="#c9b1f7">join_all</text>
+
+    <!-- loop -->
+    <rect x="1024" y="280" width="176" height="150" rx="9" fill="#121c30" stroke="#b189f5" stroke-opacity="0.45"/>
+    <text x="1040" y="306" class="mono" font-size="13" fill="#c9b1f7">loop</text>
+    <text x="1040" y="330" class="tiny2">do-while body</text>
+    <text x="1040" y="347" class="tiny2">exit_condition is typed,</text>
+    <text x="1040" y="364" class="tiny2">checked after each pass</text>
+    <text x="1040" y="381" class="tiny2">max_iterations cap</text>
+    <text x="1040" y="406" class="mono" font-size="10.5" fill="#c9b1f7">review.score &gt;= 8</text>
+
+    <!-- workflow -->
+    <rect x="1216" y="280" width="176" height="150" rx="9" fill="#121c30" stroke="#b189f5" stroke-opacity="0.45"/>
+    <text x="1232" y="306" class="mono" font-size="13" fill="#c9b1f7">workflow</text>
+    <text x="1232" y="330" class="tiny2">runs another file</text>
+    <text x="1232" y="347" class="tiny2">inputs: explicit, isolated</text>
+    <text x="1232" y="364" class="tiny2">child outputs return</text>
+    <text x="1232" y="381" class="tiny2">as one object</text>
+    <text x="1232" y="406" class="mono" font-size="10.5" fill="#c9b1f7">depth ≤ 8</text>
+  </g>
+
+  <!-- read/write ticks -->
+  <path class="tick" d="M152 436 V 456"/>
+  <path class="tick" d="M344 436 V 456"/>
+  <path class="tick" d="M536 436 V 456"/>
+  <path class="tick" d="M728 436 V 456"/>
+  <path class="tick" d="M920 436 V 456"/>
+  <path class="tick" d="M1112 436 V 456"/>
+  <path class="tick" d="M1304 436 V 456"/>
+
+  <!-- ======================= context bar ======================= -->
+  <g id="context">
+    <rect x="64" y="460" width="1328" height="90" rx="10" fill="#0d332d" stroke="#34d3bd" stroke-opacity="0.55"/>
+    <text x="84" y="488" class="mono" font-size="13" fill="#a9f0e2">ExecutionContext — HashMap&lt;String, serde_json::Value&gt;</text>
+    <text x="84" y="512" class="tiny">step outputs shadow workflow inputs · iteration N+1 sees iteration N’s outputs · child workflows get a fresh context</text>
+    <text x="84" y="532" class="tiny">field access <tspan class="mono" font-size="10.5" fill="#a9f0e2">{{report.title}}</tspan> · typed conditions <tspan class="mono" font-size="10.5" fill="#a9f0e2">score &gt;= 8</tspan> · strings interpolate raw, containers as JSON</text>
+  </g>
+
+  <!-- ======================= trait seam ======================= -->
+  <g id="seam">
+    <path class="flowT" d="M410 550 V 632"/>
+    <path class="flowT" d="M1010 550 V 632"/>
+    <rect x="332" y="576" width="156" height="26" rx="13" fill="#0b2622" stroke="#34d3bd" stroke-opacity="0.8"/>
+    <text x="410" y="593" class="mono" font-size="11" fill="#a9f0e2" text-anchor="middle">trait PromptExecutor</text>
+    <rect x="940" y="576" width="140" height="26" rx="13" fill="#0b2622" stroke="#34d3bd" stroke-opacity="0.8"/>
+    <text x="1010" y="593" class="mono" font-size="11" fill="#a9f0e2" text-anchor="middle">trait ToolExecutor</text>
+    <text x="710" y="596" class="note" text-anchor="middle">the only way out of mv-core — mocked in unit tests</text>
+  </g>
+
+  <!-- ======================= executors ======================= -->
+  <g id="executors">
+    <rect x="220" y="640" width="380" height="80" rx="10" fill="#0f2138" stroke="#58a6f2" stroke-opacity="0.55"/>
+    <text x="240" y="666" class="label">mv-cli — RigPromptExecutor</text>
+    <text x="240" y="686" class="tiny">complete_chain(): preflight · prefer / fallback walk</text>
+    <text x="240" y="704" class="tiny">→ Ollama · TRT-LLM proxy · OpenAI-compatible cloud</text>
+
+    <rect x="820" y="640" width="380" height="80" rx="10" fill="#0f2138" stroke="#58a6f2" stroke-opacity="0.55"/>
+    <text x="840" y="666" class="label">mv-cli — HandleToolExecutor</text>
+    <text x="840" y="686" class="tiny">built-ins + MCP merged · built-ins win collisions</text>
+    <text x="840" y="704" class="tiny">→ file · shell · http_get · klams memory_search</text>
+  </g>
+
+  <text x="64" y="762" class="foot">the engine never links Rig or a provider — it is unit-tested with mock executors · DSL reference: docs/06-dsl-flow-management.md</text>
+</svg>

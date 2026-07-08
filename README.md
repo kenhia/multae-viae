@@ -3,6 +3,10 @@
 A local-first agentic controller built in Rust that orchestrates multiple LLMs,
 tools, and services to act as an always-on AI assistant.
 
+![multae-viae architecture](docs/assets/architecture.svg)
+
+*Detail view of the workflow engine: [docs/assets/architecture-workflow.svg](docs/assets/architecture-workflow.svg)*
+
 ## Vision
 
 - **Local-first**: Models run locally via Ollama/TensorRT-LLM/mistral.rs, with cloud fallback
@@ -335,4 +339,31 @@ cargo run -p mv-cli -- --session research "And what dimension is that?"
 - **Best-effort**: if klams is down, the token is missing, or a write is
   rejected (e.g. klams's backup window), the CLI warns and still answers —
   memory never blocks a prompt.
+
+### REST Server (`mv-server`)
+
+The same runtime also runs as a long-lived local daemon with a REST API, plus
+held-open sessions and cron-scheduled workflows — see
+[docs/12-mv-server.md](docs/12-mv-server.md) for the full reference.
+
+```bash
+just serve --bind 127.0.0.1:7077 --mcp-servers mcp-servers.yaml
+
+curl -s localhost:7077/v1/prompt \
+  -H 'content-type: application/json' \
+  -d '{"prompt": "What is multae-viae?"}'
+```
+
+- **Endpoints**: `GET /health`, `GET /v1/models`, `POST /v1/prompt`,
+  `POST /v1/workflows/run`, and `/v1/sessions` (create/list/delete + turns).
+- **Machine-readable errors**: `{"error":{"code","message","hint?}}` with a
+  stable `code` (the same `MvError::code()` the CLI's `--json` carries) and an
+  HTTP status derived from it.
+- **Sessions**: an agent held open across turns; with klams connected, a session
+  is recoverable by name after a restart.
+- **Schedules**: `--schedules` maps cron expressions to workflow runs
+  (skip-on-overlap); the example consumes klams-monitor events.
+- **Daemon-grade**: localhost-only by default (no auth yet — Phase 7), graceful
+  `SIGTERM` drain, and keep-alive/reconnect MCP connections. A sample systemd
+  unit ships at `crates/mv-server/mv-server.service.example`.
 

@@ -31,6 +31,11 @@ lint: fmt check
 run PROMPT *FLAGS:
     cargo run -p mv-cli -- {{FLAGS}} "{{PROMPT}}"
 
+# Run the REST controller daemon (mv-server). FLAGS go after, e.g.
+# `just serve --bind 127.0.0.1:7077 --mcp-servers mcp-servers.yaml`.
+serve *FLAGS:
+    cargo run -p mv-server -- {{FLAGS}}
+
 # CI: format check + clippy + tests
 ci:
     cargo fmt --all -- --check
@@ -54,3 +59,4 @@ test-trtllm:
 # stays green without any of this.
 test-klams:
     cargo test -p mv-cli --test cli_klams -- --ignored --test-threads=1 --nocapture
+    cargo test -p mv-server --test api -- --ignored --test-threads=1 --nocapture

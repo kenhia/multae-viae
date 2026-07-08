@@ -199,6 +199,49 @@ impl MvError {
                 | MvError::McpServerError { .. }
         )
     }
+
+    /// A stable, machine-readable SCREAMING_SNAKE_CASE code for this error.
+    ///
+    /// The `Display` message is for humans (and may change wording); this code
+    /// is the contract a programmatic caller branches on — most importantly the
+    /// `mv-server` HTTP error envelope and the CLI's `--json` errors. The match
+    /// is **exhaustive on purpose** (no `_` arm): adding an `MvError` variant
+    /// without assigning it a code is a compile error, which is what keeps the
+    /// code set complete as the taxonomy grows.
+    pub fn code(&self) -> &'static str {
+        match self {
+            MvError::EmptyPrompt => "EMPTY_PROMPT",
+            MvError::BackendUnreachable { .. } => "BACKEND_UNREACHABLE",
+            MvError::ModelNotFound { .. } => "MODEL_NOT_FOUND",
+            MvError::ModelNotLoaded { .. } => "MODEL_NOT_LOADED",
+            MvError::StreamingNotSupported => "STREAMING_NOT_SUPPORTED",
+            MvError::MaxTurnsExceeded { .. } => "MAX_TURNS_EXCEEDED",
+            MvError::ToolCallFailed { .. } => "TOOL_CALL_FAILED",
+            MvError::CompletionFailed { .. } => "COMPLETION_FAILED",
+            MvError::ConfigNotFound { .. } => "CONFIG_NOT_FOUND",
+            MvError::ConfigParseError { .. } => "CONFIG_PARSE_ERROR",
+            MvError::ModelNotInRegistry { .. } => "MODEL_NOT_IN_REGISTRY",
+            MvError::AllModelsFailed { .. } => "ALL_MODELS_FAILED",
+            MvError::ApiKeyMissing { .. } => "API_KEY_MISSING",
+            MvError::McpConfigNotFound { .. } => "MCP_CONFIG_NOT_FOUND",
+            MvError::McpConfigParseError { .. } => "MCP_CONFIG_PARSE_ERROR",
+            MvError::McpServerError { .. } => "MCP_SERVER_ERROR",
+            MvError::McpDuplicateServer { .. } => "MCP_DUPLICATE_SERVER",
+            MvError::WorkflowFileNotFound { .. } => "WORKFLOW_FILE_NOT_FOUND",
+            MvError::WorkflowParseError { .. } => "WORKFLOW_PARSE_ERROR",
+            MvError::WorkflowValidationError { .. } => "WORKFLOW_VALIDATION_ERROR",
+            MvError::WorkflowStepFailed { .. } => "WORKFLOW_STEP_FAILED",
+            MvError::WorkflowStepError { .. } => "WORKFLOW_STEP_ERROR",
+            MvError::WorkflowInputMissing { .. } => "WORKFLOW_INPUT_MISSING",
+            MvError::WorkflowInputInvalid { .. } => "WORKFLOW_INPUT_INVALID",
+            MvError::WorkflowTemplateError { .. } => "WORKFLOW_TEMPLATE_ERROR",
+            MvError::WorkflowParallelFailed { .. } => "WORKFLOW_PARALLEL_FAILED",
+            MvError::MemoryError { .. } => "MEMORY_ERROR",
+            MvError::WorkflowCycle { .. } => "WORKFLOW_CYCLE",
+            MvError::WorkflowDepthExceeded { .. } => "WORKFLOW_DEPTH_EXCEEDED",
+            MvError::BackendErrorResponse { .. } => "BACKEND_ERROR_RESPONSE",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -425,6 +468,158 @@ mod tests {
                 details: "d".into()
             }
             .is_fallback_eligible()
+        );
+    }
+
+    /// One instance of every `MvError` variant. The `code()` match is
+    /// exhaustive at compile time; this list is exhaustive at test time so the
+    /// uniqueness/format pins below cover the whole taxonomy. Add a variant →
+    /// `code()` won't compile without a code → add it here too.
+    fn one_of_each() -> Vec<MvError> {
+        let s = || "x".to_string();
+        vec![
+            MvError::EmptyPrompt,
+            MvError::BackendUnreachable {
+                endpoint: s(),
+                hint: s(),
+            },
+            MvError::ModelNotFound { model: s() },
+            MvError::ModelNotLoaded {
+                model: s(),
+                hint: s(),
+            },
+            MvError::StreamingNotSupported,
+            MvError::MaxTurnsExceeded { turns: 10 },
+            MvError::ToolCallFailed {
+                tool: s(),
+                details: s(),
+            },
+            MvError::CompletionFailed { details: s() },
+            MvError::ConfigNotFound { path: s() },
+            MvError::ConfigParseError {
+                path: s(),
+                details: s(),
+            },
+            MvError::ModelNotInRegistry {
+                model: s(),
+                available: s(),
+            },
+            MvError::AllModelsFailed { attempts: vec![] },
+            MvError::ApiKeyMissing {
+                provider: s(),
+                env_var: s(),
+            },
+            MvError::McpConfigNotFound { path: s() },
+            MvError::McpConfigParseError {
+                path: s(),
+                details: s(),
+            },
+            MvError::McpServerError {
+                server: s(),
+                details: s(),
+            },
+            MvError::McpDuplicateServer { name: s() },
+            MvError::WorkflowFileNotFound { path: s() },
+            MvError::WorkflowParseError {
+                path: s(),
+                details: s(),
+            },
+            MvError::WorkflowValidationError { details: s() },
+            MvError::WorkflowStepFailed {
+                step: s(),
+                details: s(),
+            },
+            MvError::WorkflowStepError {
+                step: s(),
+                source: Box::new(MvError::EmptyPrompt),
+            },
+            MvError::WorkflowInputMissing { name: s() },
+            MvError::WorkflowInputInvalid {
+                name: s(),
+                value: s(),
+                allowed: s(),
+            },
+            MvError::WorkflowTemplateError {
+                step: s(),
+                details: s(),
+            },
+            MvError::WorkflowParallelFailed {
+                step: s(),
+                failures: vec![],
+            },
+            MvError::MemoryError {
+                op: s(),
+                details: s(),
+            },
+            MvError::WorkflowCycle { chain: s() },
+            MvError::WorkflowDepthExceeded { max: 8 },
+            MvError::BackendErrorResponse {
+                endpoint: s(),
+                model: s(),
+                status: 500,
+                details: s(),
+            },
+        ]
+    }
+
+    #[test]
+    fn every_error_code_is_unique_and_well_formed() {
+        let errs = one_of_each();
+        let codes: Vec<&str> = errs.iter().map(MvError::code).collect();
+
+        // Non-empty, SCREAMING_SNAKE_CASE (A–Z, 0–9, underscore; not leading/
+        // trailing/doubled underscore).
+        for code in &codes {
+            assert!(!code.is_empty(), "empty code");
+            assert!(
+                code.bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_'),
+                "code '{code}' is not SCREAMING_SNAKE_CASE"
+            );
+            assert!(
+                !code.starts_with('_') && !code.ends_with('_') && !code.contains("__"),
+                "code '{code}' has a misplaced underscore"
+            );
+        }
+
+        // Unique across the whole taxonomy.
+        let unique: std::collections::HashSet<&str> = codes.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            codes.len(),
+            "duplicate error code(s): {codes:?}"
+        );
+    }
+
+    #[test]
+    fn key_error_codes_are_stable() {
+        // Pin the codes downstream callers (mv-server, --json) branch on.
+        assert_eq!(
+            MvError::ModelNotLoaded {
+                model: "m".into(),
+                hint: "h".into()
+            }
+            .code(),
+            "MODEL_NOT_LOADED"
+        );
+        assert_eq!(
+            MvError::ModelNotInRegistry {
+                model: "m".into(),
+                available: "a".into()
+            }
+            .code(),
+            "MODEL_NOT_IN_REGISTRY"
+        );
+        assert_eq!(MvError::EmptyPrompt.code(), "EMPTY_PROMPT");
+        assert_eq!(
+            MvError::BackendErrorResponse {
+                endpoint: "e".into(),
+                model: "m".into(),
+                status: 500,
+                details: "d".into()
+            }
+            .code(),
+            "BACKEND_ERROR_RESPONSE"
         );
     }
 }

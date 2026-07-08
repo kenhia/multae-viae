@@ -3,10 +3,12 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+pub mod http;
 pub mod mcp;
 pub mod memory;
 pub mod preflight;
 pub mod providers;
+pub mod runtime;
 pub mod tools;
 pub mod trtllm;
 pub mod workflow;
@@ -278,6 +280,13 @@ impl ModelRegistry {
     /// List all available model IDs.
     pub fn available_ids(&self) -> Vec<&str> {
         self.models.iter().map(|m| m.id.as_str()).collect()
+    }
+
+    /// All registered model entries, in declaration order. Lets a front end
+    /// (e.g. mv-server's `/v1/models`) enumerate the registry without resolving
+    /// each id individually.
+    pub fn entries(&self) -> &[ModelEntry] {
+        &self.models
     }
 
     /// Built-in registry with hardcoded defaults (backward compat).

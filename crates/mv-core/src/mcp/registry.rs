@@ -90,6 +90,7 @@ pub async fn register_mcp_tools(
     };
 
     let mut registered = 0;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for def in mcp_defs {
         // Skip MCP tools that shadow built-in tools (exact name match)
         if BUILT_IN_TOOL_NAMES.contains(&def.name.as_str()) {
@@ -105,6 +106,18 @@ pub async fn register_mcp_tools(
             info!(
                 tool = %def.name,
                 "MCP tool overlaps with built-in tool; skipping to reduce tool count"
+            );
+            continue;
+        }
+
+        // Cross-server name collision: two MCP servers exposing the same tool
+        // name. The model can only see one, so flag it (F22) — keep the first
+        // and skip the rest. Tool namespacing (`server.tool`) is the deeper
+        // fix and is deferred; this at least makes the shadowing visible.
+        if !seen.insert(def.name.clone()) {
+            warn!(
+                tool = %def.name,
+                "duplicate MCP tool name across servers; keeping the first, skipping this one"
             );
             continue;
         }

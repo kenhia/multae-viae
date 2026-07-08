@@ -1,0 +1,39 @@
+name: monitor-summary
+version: "1.0"
+description: >
+  Summarize recent klams-monitor events into a short status digest. Intended to
+  be run on a schedule by mv-server (see schedules.yaml) — the roadmap's
+  "consumes klams-monitor events" deliverable, expressed as configuration rather
+  than new code. Requires the klams MCP server to be connected (it exposes the
+  `event_search` tool).
+
+defaults:
+  model: qwen3:4b
+
+steps:
+  - id: fetch
+    name: Fetch recent monitor events
+    type: tool
+    output: events
+    tool: event_search
+    inputs:
+      category: monitor
+      order: desc
+      limit: 20
+
+  - id: summarize
+    name: Summarize the events
+    type: prompt
+    output: summary
+    template: |
+      You are a system monitor assistant. Summarize the following recent
+      klams-monitor events into a concise status digest: note anything that
+      looks like an error, a recurring warning, or a change worth a human's
+      attention. If nothing is notable, say so in one line.
+
+      Events (most recent first):
+      {{events}}
+
+outputs:
+  - name: digest
+    from: summarize

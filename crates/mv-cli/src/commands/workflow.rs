@@ -3,8 +3,7 @@
 use rig::tool::server::ToolServer;
 
 use crate::cli::{WorkflowRunArgs, WorkflowValidateArgs};
-use crate::commands::connect_mcp_servers;
-use crate::executors::{HandleToolExecutor, RigPromptExecutor};
+use mv_core::runtime::{HandleToolExecutor, RigPromptExecutor};
 
 pub async fn run_workflow(args: &WorkflowRunArgs, json: bool) -> Result<(), mv_core::MvError> {
     use std::path::Path;
@@ -50,7 +49,9 @@ pub async fn run_workflow(args: &WorkflowRunArgs, json: bool) -> Result<(), mv_c
         .tool(mv_core::tools::http_get::HttpGet);
     let agent_handle = tool_server.run();
 
-    let mcp_connections = connect_mcp_servers(args.mcp_config.as_deref(), &agent_handle).await?;
+    let mcp_manager =
+        mv_core::mcp::manager::McpManager::connect(args.mcp_config.as_deref(), &agent_handle)
+            .await?;
 
     let default_model = registry.default_model().id.clone();
     let prompt_exec = RigPromptExecutor {
@@ -72,7 +73,7 @@ pub async fn run_workflow(args: &WorkflowRunArgs, json: bool) -> Result<(), mv_c
     .await;
 
     // Always shut down MCP connections, even on error
-    mv_core::mcp::client::shutdown_all(mcp_connections).await;
+    mcp_manager.shutdown().await;
 
     let result = result?;
 

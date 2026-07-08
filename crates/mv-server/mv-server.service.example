@@ -1,0 +1,32 @@
+# Sample systemd unit for mv-server. Copy to /etc/systemd/system/mv-server.service
+# (or ~/.config/systemd/user/ for a user service), edit the paths/user, then:
+#
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now mv-server
+#
+# `systemctl stop` sends SIGTERM, which mv-server handles gracefully: it stops
+# accepting connections, drains in-flight requests, stops the scheduler, shuts
+# down MCP connections, and flushes telemetry before exiting 0.
+
+[Unit]
+Description=multae-viae REST controller daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The KLAMS bearer (and any provider API keys) live in this env file, not here.
+EnvironmentFile=-/etc/mv-server/env
+ExecStart=/usr/local/bin/mv-server \
+    --bind 127.0.0.1:7077 \
+    --models /etc/mv-server/models.yaml \
+    --mcp-servers /etc/mv-server/mcp-servers.yaml \
+    --workflows-dir /etc/mv-server/workflows \
+    --schedules /etc/mv-server/schedules.yaml
+Restart=on-failure
+RestartSec=5
+# Give the graceful drain time to complete before SIGKILL.
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

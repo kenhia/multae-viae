@@ -27,16 +27,13 @@ fn health_url(endpoint: &str) -> String {
 pub async fn check_health(endpoint: &str, timeout: Duration) -> HealthCheckResult {
     let url = health_url(endpoint);
 
-    let client = match reqwest::Client::builder().timeout(timeout).build() {
-        Ok(c) => c,
-        Err(e) => {
-            return HealthCheckResult::Unreachable {
-                error: e.to_string(),
-            };
-        }
-    };
-
-    match client.get(&url).send().await {
+    // Shared pooled client; the per-probe timeout is applied per request.
+    match crate::http::client()
+        .get(&url)
+        .timeout(timeout)
+        .send()
+        .await
+    {
         Ok(resp) => {
             let status = resp.status().as_u16();
             if status == 200 {
@@ -91,8 +88,12 @@ pub async fn served_model_present(
     model_name: &str,
     timeout: Duration,
 ) -> Option<bool> {
-    let client = reqwest::Client::builder().timeout(timeout).build().ok()?;
-    let resp = client.get(models_url(endpoint)).send().await.ok()?;
+    let resp = crate::http::client()
+        .get(models_url(endpoint))
+        .timeout(timeout)
+        .send()
+        .await
+        .ok()?;
     if resp.status().as_u16() != 200 {
         return None;
     }
